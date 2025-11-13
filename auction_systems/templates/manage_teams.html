@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Manage Teams</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #f3f4f6;
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-6 lg:p-8">
+    <div class="max-w-7xl mx-auto">
+        <header class="bg-white shadow-md rounded-xl p-4 mb-8 flex justify-between items-center">
+            <h1 class="text-3xl font-extrabold text-indigo-600">Manage Teams & Members</h1>
+            <a href="{{ url_for('admin_dashboard') }}" class="text-sm text-blue-500 hover:text-blue-700 font-medium transition duration-150 py-2 px-3 border border-blue-300 rounded-lg">
+                &larr; Back to Dashboard
+            </a>
+        </header>
+
+        {% if error %}
+            <div class="p-3 mb-4 bg-red-100 text-red-700 rounded-lg text-sm font-medium border border-red-300">
+                <strong>Error:</strong> {{ error }}
+            </div>
+        {% endif %}
+        {% if success %}
+            <div class="p-3 mb-4 bg-green-100 text-green-700 rounded-lg text-sm font-medium border border-green-300">
+                {{ success }}
+            </div>
+        {% endif %}
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <!-- Left Column: Add Team & Team List -->
+            <div class="lg:col-span-1 space-y-8">
+                <!-- Form to Add a New Team -->
+                <div class="bg-white shadow-xl rounded-xl p-6 border border-purple-200">
+                    <h2 class="text-2xl font-bold text-gray-800 mb-4">Create New Team</h2>
+                    <form method="POST" action="{{ url_for('register_team') }}" class="space-y-4">
+                        <div>
+                            <label for="team_name" class="block text-sm font-medium text-gray-700">Team Name (also used as Username)</label>
+                            <input type="text" id="team_name" name="team_name" required
+                                   class="mt-1 w-full p-2 border border-gray-300 rounded-lg focus:ring-purple-500 focus:border-purple-500" placeholder="e.g., The Gladiators">
+                        </div>
+                        <div>
+                            <label for="password" class="block text-sm font-medium text-gray-700">Password for Team Account</label>
+                            <input type="password" id="password" name="password" required
+                                   class="mt-1 w-full p-2 border border-gray-300 rounded-lg focus:ring-purple-500 focus:border-purple-500" placeholder="Set a password">
+                        </div>
+                        <button type="submit" class="w-full bg-purple-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-purple-700 transition duration-150 shadow-md">
+                            Add Team
+                        </button>
+                    </form>
+                </div>
+
+                <!-- Existing Teams List -->
+                <div class="bg-white shadow-xl rounded-xl p-6 border border-indigo-200">
+                    <div class="flex justify-between items-center mb-4">
+                        <h2 class="text-2xl font-bold text-gray-800">Team Roster</h2>
+                        <a href="{{ url_for('download_team_roster') }}" class="bg-indigo-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-indigo-700 transition duration-150 shadow-md text-sm">
+                            Download Roster
+                        </a>
+                    </div>
+                    <ul class="divide-y divide-gray-200">
+                        {% for team in teams_with_budgets %}
+                            <li class="py-3">
+                                <strong class="text-indigo-700">{{ team.name }}</strong>
+                                <div class="flex items-center justify-between">
+                                    <p class="text-sm text-green-600 font-semibold">Budget: ₹{{ '%.2f' | format(team.budget) }}</p>
+                                    <button onclick="openEditModal({{ team.id }}, '{{ team.name }}', {{ team.budget }})" class="text-blue-500 hover:text-blue-700 text-xs">Edit Budget</button>
+                                </div>
+                                <div class="text-sm text-gray-600 mt-2">
+                                    <span class="font-medium">Players Bought:</span>
+                                    <ul class="list-disc list-inside pl-4">
+                                        {% for player in sold_players if player.team_name == team.name %}
+                                            <li>{{ player.player_name }} - ₹{{ '%.2f' | format(player.sold_price) }}</li>
+                                        {% endfor %}
+                                    </ul>
+                                </p>
+                            </div>
+                        {% else %}
+                            <li class="text-gray-500">No teams created yet.</li>
+                        {% endfor %}
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Edit Team Budget Modal -->
+            <div id="editBudgetModal" class="fixed z-10 inset-0 overflow-y-auto hidden" aria-labelledby="modal-title" role="dialog" aria-modal="true">
+                <div class="flex items-end justify-center min-h-screen pt-4 px-4 pb-20 text-center sm:block sm:p-0">
+                    <div class="fixed inset-0 bg-gray-500 bg-opacity-75 transition-opacity" aria-hidden="true"></div>
+                    <span class="hidden sm:inline-block sm:align-middle sm:h-screen" aria-hidden="true">&#8203;</span>
+                    <div class="inline-block align-bottom bg-white rounded-lg text-left overflow-hidden shadow-xl transform transition-all sm:my-8 sm:align-middle sm:max-w-lg sm:w-full">
+                        <div class="bg-white px-4 pt-5 pb-4 sm:p-6 sm:pb-4">
+                            <h3 class="text-lg leading-6 font-medium text-gray-900" id="modal-title">Edit Team Budget</h3>
+                            <p id="edit-team-name" class="text-md text-gray-500 mt-2"></p>
+                            <form id="edit-budget-form" method="POST" action="{{ url_for('update_team_budget') }}">
+                                <input type="hidden" id="edit-team-id" name="team_id">
+                                <div class="mt-2">
+                                    <label for="new_budget" class="block text-sm font-medium text-gray-700">New Budget:</label>
+                                    <input type="number" name="new_budget" id="new_budget" required
+                                           class="mt-1 w-full p-2 border border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500">
+                                </div>
+                                <div class="bg-gray-50 px-4 py-3 sm:px-6 sm:flex sm:flex-row-reverse">
+                                    <button type="submit" class="w-full inline-flex justify-center rounded-md border border-transparent shadow-sm px-4 py-2 bg-green-600 text-base font-medium text-white hover:bg-green-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-green-500 sm:ml-3 sm:w-auto sm:text-sm">
+                                        Update
+                                    </button>
+                                    <button type="button" onclick="closeEditModal()" class="mt-3 w-full inline-flex justify-center rounded-md border border-gray-300 shadow-sm px-4 py-2 bg-white text-base font-medium text-gray-700 hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 sm:mt-0 sm:ml-3 sm:w-auto sm:text-sm">
+                                        Cancel
+                                    </button>
+                                </div>
+                            </form>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Right Column: Sold Players -->
+            <div class="lg:col-span-2 bg-white shadow-xl rounded-xl p-6 border border-blue-200">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="text-2xl font-bold text-gray-800">Sold Players by Team</h2>
+                    <a href="{{ url_for('download_sold_players') }}" class="bg-blue-600 text-white font-bold py-2 px-4 rounded-lg hover:bg-blue-700 transition duration-150 shadow-md text-sm">
+                        Download Data
+                    </a>
+                </div>
+                <div class="divide-y divide-gray-200">
+                    {% set current_team = '' %}
+                    {% for player in sold_players %}
+                        {% if player.team_name != current_team %}
+                            {% if not loop.first %}
+                                </ul>
+                            {% endif %}
+                            <h3 class="text-lg font-bold text-blue-700 pt-4">{{ player.team_name }}</h3>
+                            <ul class="list-disc list-inside pl-4 pt-2 space-y-1">
+                            {% set current_team = player.team_name %}
+                        {% endif %}
+                        <li class="text-sm text-gray-700">{{ player.player_name }} - <span class="font-semibold">₹{{ '%.2f' | format(player.sold_price) }}</span></li>
+                    {% else %}
+                        <p class="text-gray-500">No players have been sold yet.</p>
+                    {% endfor %}
+                    </ul>
+                </div>
+            </div>
+
+        </div>
+    </div>
+    <script>
+        function openEditModal(teamId, teamName, teamBudget) {
+            document.getElementById('edit-team-id').value = teamId;
+            document.getElementById('edit-team-name').innerText = `Editing budget for ${teamName}`;
+            document.getElementById('editBudgetModal').classList.remove('hidden');
+        }
+
+        function closeEditModal() {
+            document.getElementById('editBudgetModal').classList.add('hidden');
+        }
+
+        window.onclick = function(event) {
+            if (event.target == document.getElementById('editBudgetModal')) {
+                closeEditModal();
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,367 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Auction Admin Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            @apply bg-gray-100 dark:bg-gray-900 text-gray-800 dark:text-gray-200;
+        }
+    </style>
+</head>
+<body>
+    <div class="main-container max-w-7xl mx-auto p-4 sm:p-6 lg:p-8">
+        <header class="bg-white shadow-md rounded-xl p-4 mb-8 flex justify-between items-center flex-wrap gap-4">
+            <h1 class="text-3xl font-extrabold text-indigo-600">Auction Admin Dashboard</h1>
+            <div class="flex items-center space-x-4 text-gray-800">
+                <p class="text-sm font-medium text-gray-600">
+                    Logged in as: <span class="font-bold text-indigo-700">{{ session.username }}</span>
+                </p>
+                <a href="{{ url_for('manage_teams') }}" class="text-sm text-purple-600 hover:text-purple-800 font-medium transition duration-150 py-2 px-3 border border-purple-300 rounded-lg dark:text-purple-400 dark:border-purple-500 dark:hover:text-purple-300">
+                    Manage Teams
+                </a>
+                <a href="{{ url_for('logout') }}" class="text-sm text-red-500 hover:text-red-700 font-medium transition duration-150 py-2 px-3 border border-red-300 rounded-lg dark:text-red-400 dark:border-red-500 dark:hover:text-red-300">Logout</a>
+            </div>
+        </header>
+
+        <!-- Auction Stats -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+            <div class="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg text-center border-2 border-blue-200 dark:border-blue-700">
+                <h3 class="text-sm font-semibold text-gray-500">Registered Players</h3>
+                <p id="total-players" class="text-3xl font-bold text-blue-600">{{ total_players }}</p>
+            </div>
+            <div class="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg text-center border-2 border-green-200 dark:border-green-700">
+                <h3 class="text-sm font-semibold text-gray-500">Sold Players</h3>
+                <p id="sold-players" class="text-3xl font-bold text-green-600">{{ sold_players }}</p>
+            </div>
+            <div class="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg text-center border-2 border-red-200 dark:border-red-700">
+                <h3 class="text-sm font-semibold text-gray-500">Unsold Players</h3>
+                <p id="unsold-players" class="text-3xl font-bold text-red-600">{{ unsold_players }}</p>
+            </div>
+        </div>
+
+        <!-- System Controls -->
+        <div class="bg-white dark:bg-gray-800 shadow-xl rounded-xl p-6 mb-8 border-2 border-yellow-300 dark:border-yellow-700">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4">System Controls</h2>
+            <div class="flex items-center justify-between flex-wrap gap-4">
+                <div>
+                    <p class="font-medium">Player Registration Status: 
+                        <span id="reg-status" class="font-bold {% if registration_status == 'open' %}text-green-600{% else %}text-red-600{% endif %}">
+                            {{ registration_status_display }}
+                        </span>
+                    </p>
+                    {% if registration_status == 'open' and registration_ends_at %}
+                        <p class="text-sm text-gray-500">Closes at: {{ registration_ends_at }}</p>
+                    {% endif %}
+                </div>
+                <form method="POST" action="{{ url_for('toggle_registration') }}">
+                    {% if registration_status == 'open' %}
+                        <button type="submit" name="action" value="close" class="bg-red-600 text-white font-bold px-4 py-2 rounded-md text-sm hover:bg-red-700 shadow-md transition duration-150">Close Registration</button>
+                    {% else %}
+                        <button type="submit" name="action" value="open" class="bg-green-600 text-white font-bold px-4 py-2 rounded-md text-sm hover:bg-green-700 shadow-md transition duration-150">Open Registration (24h)</button>
+                    {% endif %}
+                </form>
+            </div>
+            <hr class="my-4 border-gray-300 dark:border-gray-600">
+            <div class="flex items-center justify-between flex-wrap gap-4">
+                <form method="POST" action="{{ url_for('update_budget') }}" class="flex items-center gap-4">
+                    <div>
+                        <label for="default_budget" class="font-medium">Default Team Budget (for new teams):</label>
+                        <div class="flex items-center mt-1">
+                            <span class="text-gray-500 mr-2">₹</span>
+                            <input type="number" name="default_budget" id="default_budget" 
+                                   value="{{ '%.2f' | format(default_team_budget) }}" 
+                                   step="1000" min="0"
+                                   class="p-2 border border-gray-300 rounded-md w-48 bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200">
+                        </div>
+                    </div>
+                    <button type="submit" class="bg-blue-600 text-white font-bold px-4 py-2 rounded-md text-sm hover:bg-blue-700 shadow-md transition duration-150 self-end">
+                        Update Budget
+                    </button>
+                </form>
+            </div>
+        </div>
+
+        <main class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <div class="lg:col-span-2">
+                {% if error %}
+                    <div class="p-3 mb-4 bg-red-100 text-red-700 rounded-lg text-sm font-medium border border-red-300 dark:bg-red-900 dark:text-red-200 dark:border-red-700">
+                        <strong>Error:</strong> {{ error }}
+                    </div>
+                {% endif %}
+
+                <!-- Players Ready for Auction -->
+                <h2 class="text-2xl font-bold text-gray-800 mb-4">Players Ready for Auction ({{ players_ready_for_auction | length }})</h2>
+                <div class="bg-white dark:bg-gray-800 shadow-xl rounded-xl p-6 mb-8 border-2 border-green-200 dark:border-green-700">
+                    <div id="players-ready-list" class="divide-y divide-gray-200">
+                        {% if players_ready_for_auction %}
+                            {% for player in players_ready_for_auction %}
+                                <div class="py-4 flex flex-col md:flex-row md:justify-between md:items-center gap-4">
+                                    <div class="flex-grow">
+                                        <p class="font-bold text-gray-800 dark:text-gray-100">{{ player.username }}</p>
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 mt-1 space-x-2 sm:space-x-4">
+                                            <span>Discord: <span class="font-semibold text-gray-700">{{ player.discord_name }}</span></span>
+                                            <span>Base Price: <span class="font-semibold text-gray-700">₹{{ '%.2f' | format(player.base_price|default(0.0)) }}</span></span>
+                                            <span>Level: <span class="font-semibold text-gray-700">{{ player.game_level }}</span></span>
+                                        </div>
+                                    </div>
+                                    <form method="POST" action="{{ url_for('start_player_auction', user_id=player.id) }}">
+                                        <button type="submit" class="bg-purple-600 text-white font-bold px-4 py-2 rounded-md text-sm hover:bg-purple-700 shadow-md transition duration-150">
+                                            Start Auction
+                                        </button>
+                                    </form>
+                                </div>
+                            {% endfor %}
+                        {% else %}
+                            <p class="text-gray-500 dark:text-gray-400 py-3">No new players have registered.</p>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <hr class="my-8 border-gray-300 dark:border-gray-600">
+
+                <!-- Unsold Players -->
+                <h2 class="text-2xl font-bold text-gray-800 mb-4">Unsold Players ({{ unsold_auctions | length }})</h2>
+                <div class="bg-white dark:bg-gray-800 shadow-xl rounded-xl p-6 mb-8 border-2 border-red-200 dark:border-red-700">
+                    <div id="unsold-players-list" class="divide-y divide-gray-200">
+                        {% if unsold_auctions %}
+                            {% for auction in unsold_auctions %}
+                                <div class="py-4 flex flex-col md:flex-row md:justify-between md:items-center gap-4">
+                                    <div class="flex-grow">
+                                        <p class="font-bold text-gray-800 dark:text-gray-100">{{ auction.title }}</p>
+                                        <div class="text-xs text-gray-500 dark:text-gray-400 mt-1 space-x-2 sm:space-x-4">
+                                            <span>Discord: <span class="font-semibold text-gray-700">{{ auction.discord_name }}</span></span>
+                                            <span>Base Price: <span class="font-semibold text-gray-700">₹{{ '%.2f' | format(auction.base_price|default(0.0)) }}</span></span>
+                                            <span>Level: <span class="font-semibold text-gray-700">{{ auction.game_level }}</span></span>
+                                        </div>
+                                    </div>
+                                    <form method="POST" action="{{ url_for('reauction_player', auction_id=auction.id) }}">
+                                        <button type="submit" class="bg-red-600 text-white font-bold px-4 py-2 rounded-md text-sm hover:bg-red-700 shadow-md transition duration-150">
+                                            Re-auction
+                                        </button>
+                                    </form>
+                                </div>
+                            {% endfor %}
+                        {% else %}
+                            <p class="text-gray-500 dark:text-gray-400 py-3">No players are currently unsold.</p>
+                        {% endif %}
+                    </div>
+                </div>
+
+                <hr class="my-8 border-gray-300 dark:border-gray-600">
+
+                <!-- All Auctions (Live/Sold) -->
+                <h2 class="text-2xl font-bold text-gray-800 mb-6">All Auctions ({{ auctions | length }})</h2>
+                <div id="auction-list" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {% if auctions %}
+                        {% for auction in auctions %}
+                            <div class="bg-white dark:bg-gray-800 rounded-xl shadow-lg p-5 border-2 {% if auction.status == 'live' %}border-indigo-400{% elif auction.status == 'Sold' %}border-green-400{% else %}border-gray-300{% endif %}">
+                                <h3 class="text-xl font-bold text-gray-900 dark:text-gray-100 mb-2">{{ auction.title }}</h3>
+                                <div class="grid grid-cols-2 gap-2 text-sm">
+                                    <p class="text-gray-600">Final/Current Price:</p>
+                                    <p class="font-bold text-red-600">₹{{ '%.2f' | format(auction.current_price) }}</p>
+
+                                    <p class="text-gray-600">Highest Bidder:</p>
+                                    <p class="font-medium text-indigo-600">{{ auction.highest_bidder_username or 'N/A' }}</p>
+                                    
+                                    <p class="text-gray-600">Status:</p>
+                                    <p class="font-bold {% if auction.status == 'live' %}text-green-600{% elif auction.status == 'Sold' %}text-blue-600{% else %}text-red-600{% endif %}">{{ auction.status | upper }}</p>
+                                    
+                                    <p class="text-gray-600">Time Left:</p>
+                                    <p id="admin-time-left-{{ auction.id }}" class="font-bold text-red-500 text-lg">--</p>
+                                </div>
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <p class="col-span-full text-center text-gray-500 dark:text-gray-400 p-8 bg-white dark:bg-gray-800 rounded-xl shadow-lg">No auctions are live or have been completed.</p>
+                    {% endif %}
+                </div>
+            </div>
+
+            <!-- Team Budgets -->
+            <div class="bg-white dark:bg-gray-800 shadow-xl rounded-xl p-6 mb-8 border-2 border-blue-200 dark:border-blue-700">
+                <h2 class="text-2xl font-bold text-gray-800 mb-4">Team Budgets</h2>
+                <ul id="team-budgets-list" class="divide-y divide-gray-200">
+                    {% if teams_with_budgets %}
+                        {% for team in teams_with_budgets %}
+                            <li id="team-budget-{{ team.id }}" class="py-2 flex justify-between items-center">
+                                <span class="font-bold text-gray-800 dark:text-gray-100">{{ team.name }}</span>
+                                <span class="font-semibold text-green-600">₹{{ '%.2f' | format(team.budget) }}</span>
+                            </li>
+                        {% endfor %}
+                    {% else %}
+                        <p class="text-gray-500 dark:text-gray-400 py-3">No teams have been created yet.</p>
+                    {% endif %}
+                </ul>
+            </div>
+
+
+            <aside class="lg:col-span-1">
+                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg border-2 border-gray-200 dark:border-gray-700 sticky top-8">
+                    <h2 class="text-xl font-bold text-gray-800 mb-4">Live Bidding Activity</h2>
+                    <ul id="activity-feed" class="space-y-3 h-[600px] overflow-y-auto pr-2">
+                        <li class="text-gray-500 dark:text-gray-400 text-sm">Waiting for bids...</li>
+                    </ul>
+                </div>
+            </aside>
+
+        </main>
+    </div>
+
+</body>
+<script>
+    // Socket.IO से कनेक्ट करें
+    let timers = {};
+
+    function formatTime(seconds) {
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = seconds % 60;
+        return `${minutes}:${remainingSeconds < 10 ? '0' : ''}${remainingSeconds}`;
+    }
+
+    function updateTimer(auctionId, timeLeft) {
+        const timerElement = document.getElementById(`admin-time-left-${auctionId}`);
+        if (timerElement) {
+            timerElement.textContent = formatTime(timeLeft);
+        }
+    }
+
+    const socket = io();
+
+    socket.on('connect', function() {
+        // पेज लोड होने पर सभी लाइव टाइमर की स्थिति प्राप्त करें
+        socket.emit('get_all_timers');
+    });
+
+    socket.on('new_team', function(data) {
+        // नया टीम विकल्प बनाएं
+        var newOption = document.createElement('option');
+        newOption.value = data.team_name;
+        newOption.textContent = data.team_name;
+
+        // सभी टीम असाइनमेंट सेलेक्ट फ़ील्ड में नया विकल्प जोड़ें
+        var selectElements = document.querySelectorAll('select[name="team_id"]');
+        selectElements.forEach(function(selectElement) {
+            selectElement.add(newOption.cloneNode(true)); // हर सेलेक्ट फ़ील्ड के लिए एक कॉपी जोड़ें
+        });
+
+        // अलर्ट दिखाएं
+        alert(`New team "${data.team_name}" created!`);
+    });
+
+    // Listener for activity history on connect
+    socket.on('activity_history', function(history) {
+        const activityFeed = document.getElementById('activity-feed');
+        // Clear the "Waiting for bids..." message
+        activityFeed.innerHTML = ''; 
+        history.forEach(function(activity) {
+            const newActivity = document.createElement('li');
+            newActivity.className = 'text-sm p-2 bg-gray-100 dark:bg-gray-700 rounded-md';
+            newActivity.innerHTML = `${activity.message} <span class="text-gray-400 text-xs float-right">${activity.timestamp}</span>`;
+            // Append so that the order is correct (oldest at the top)
+            activityFeed.appendChild(newActivity);
+        });
+    });
+
+    // New Activity Listener
+    socket.on('new_activity', function(data) {
+        const activityFeed = document.getElementById('activity-feed');
+        const newActivity = document.createElement('li');
+        newActivity.className = 'text-sm p-2 bg-gray-100 dark:bg-gray-700 rounded-md';
+        newActivity.innerHTML = `${data.message} <span class="text-gray-400 text-xs float-right">${data.timestamp}</span>`;
+        activityFeed.appendChild(newActivity); // सबसे नीचे नई गतिविधि जोड़ें
+        activityFeed.scrollTop = activityFeed.scrollHeight; // स्क्रॉल को नीचे रखें
+    });
+
+    // Stats Update Listener
+    socket.on('stats_update', function(data) {
+        document.getElementById('total-players').textContent = data.total_players;
+        document.getElementById('sold-players').textContent = data.sold_players;
+        document.getElementById('unsold-players').textContent = data.unsold_players;
+    });
+
+    socket.on('player_sold', function(data) {
+        // Update the budget for the winning team in the list
+        const teamBudgetLi = document.getElementById(`team-budget-${data.winning_team_id}`);
+        if (teamBudgetLi) {
+            teamBudgetLi.innerHTML = `
+                <span class="font-bold text-gray-800 dark:text-gray-100">${data.team_name}</span>
+                <span class="font-semibold text-green-600">₹${parseFloat(data.new_budget).toFixed(2)}</span>
+            `;
+        }
+        // Reload to update all auction statuses and lists
+        setTimeout(() => location.reload(), 1000); 
+    });
+
+    socket.on('new_team_added', function(data) {
+        // Just reload the page to get the new team in all lists
+        location.reload();
+    });
+
+
+    socket.on('player_unsold', function(data) {
+        // Reload the page to update the "Unsold Players" list
+        location.reload();
+    });
+
+    socket.on('new_auction', function(data) {
+        // This event is fired for both new and re-auctions.
+        const auctionId = data.id;
+        const auctionCard = document.getElementById(`admin-time-left-${auctionId}`);
+        if (!auctionCard) {
+            // If the card for the new auction doesn't exist, reload the page to show it.
+            location.reload();
+            return;
+        }
+        let timeLeft = data.time_left;
+
+        if (timers[auctionId]) {
+            clearInterval(timers[auctionId]);
+        }
+
+        updateTimer(auctionId, timeLeft);
+
+        timers[auctionId] = setInterval(() => {
+            timeLeft--;
+            updateTimer(auctionId, timeLeft);
+            if (timeLeft <= 0) clearInterval(timers[auctionId]);
+        }, 1000);
+    });
+
+    socket.on('auction_update', function(data) {
+        const auctionId = data.auction_id;
+        let timeLeft = data.time_left;
+
+        if (timers[auctionId]) {
+            clearInterval(timers[auctionId]);
+        }
+
+        updateTimer(auctionId, timeLeft);
+
+        timers[auctionId] = setInterval(() => {
+            timeLeft--;
+            updateTimer(auctionId, timeLeft);
+            if (timeLeft <= 0) clearInterval(timers[auctionId]);
+        }, 1000);
+    });
+
+    socket.on('all_timers_status', function(data) {
+        // सर्वर से सभी सक्रिय टाइमर की वर्तमान स्थिति प्राप्त करें
+        for (const auctionId in data) {
+            if (data.hasOwnProperty(auctionId)) {
+                const timeLeft = data[auctionId];
+                // सीधे टाइमर शुरू करें
+                if (timers[auctionId]) clearInterval(timers[auctionId]);
+                
+                let remaining = timeLeft;
+                updateTimer(auctionId, remaining);
+                timers[auctionId] = setInterval(() => { remaining--; updateTimer(auctionId, remaining); if (remaining <= 0) clearInterval(timers[auctionId]); }, 1000);
+            }
+        }
+    });
+</script>
+</html>

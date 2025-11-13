@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Team Login</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body class="flex items-center justify-center min-h-screen bg-gray-100 dark:bg-gray-900">
+    <div class="max-w-md w-full p-8 bg-white dark:bg-gray-800 rounded-xl shadow-2xl border border-gray-200 dark:border-gray-700">
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-extrabold text-blue-600">Team Login</h1>
+            <p class="text-gray-500 dark:text-gray-400 mt-2">Sign in with your team account to place bids.</p>
+        </header>
+
+        {% if error %}
+            <div class="p-3 mb-4 bg-red-100 text-red-700 rounded-lg text-sm font-medium border border-red-300 dark:bg-red-900 dark:text-red-200 dark:border-red-700">
+                {{ error }}
+            </div>
+        {% endif %}
+        
+        {% if message %}
+            <div class="p-3 mb-4 bg-green-100 text-green-700 rounded-lg text-sm font-medium border border-green-300 dark:bg-green-900 dark:text-green-200 dark:border-green-700">
+                {{ message }}
+            </div>
+        {% endif %}
+
+        <form method="POST" action="{{ url_for('login_team') }}" class="space-y-6">
+            <div>
+                <label for="username" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Team Username</label>
+                <input type="text" id="username" name="username" required 
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 shadow-sm transition duration-150 bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 dark:border-gray-600"
+                       placeholder="Enter your team's username">
+            </div>
+
+            <div>
+                <label for="password" class="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Password</label>
+                <input type="password" id="password" name="password" required 
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 shadow-sm transition duration-150 bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 dark:border-gray-600"
+                       placeholder="Enter your team's password">
+            </div>
+
+            <button type="submit" 
+                    class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 rounded-lg transition duration-200 shadow-lg hover:shadow-xl">
+                Sign In
+            </button>
+        </form>
+
+        <p class="mt-4 text-center text-sm text-gray-500 dark:text-gray-400">
+            Are you a player? 
+            <a href="{{ url_for('login_player') }}" class="font-medium text-indigo-600 hover:text-indigo-800">
+                Login as a Player
+            </a>
+        </p>
+    </div>
+</body>
+</html>

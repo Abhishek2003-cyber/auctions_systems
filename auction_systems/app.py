@@ -1,0 +1,1005 @@
+# app.py - FINAL, SECURED AND STABLE VERSION
+
+from flask import Flask, render_template, request, redirect, url_for, session, g
+from flask_socketio import SocketIO, emit, join_room, leave_room
+import sqlite3
+# सुरक्षा के लिए पासवर्ड हैशिंग लाइब्रेरी
+from werkzeug.security import generate_password_hash, check_password_hash
+import functools
+import time
+from threading import Timer
+from datetime import datetime, timedelta
+import io
+import csv
+from flask import Response
+import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+
+app = Flask(__name__)
+# सीक्रेट की (इसे प्रोडक्शन में बदलें!)
+app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', 'a_very_secure_random_string_for_development')
+socketio = SocketIO(app)
+
+# --- Database Setup ---
+
+DATABASE = 'auction.db'
+DATABASE_URL = os.getenv('DATABASE_URL')
+
+def get_db_connection():
+    """डेटाबेस कनेक्शन प्राप्त करें।"""
+    if DATABASE_URL:
+        conn = getattr(g, '_database_pg', None)
+        if conn is None:
+            conn = g._database_pg = psycopg2.connect(DATABASE_URL)
+    else:
+        conn = getattr(g, '_database', None)
+        if conn is None:
+            conn = g._database = sqlite3.connect(DATABASE)
+            conn.row_factory = sqlite3.Row
+    return conn
+
+def get_dict_cursor(conn):
+    """Get a cursor that returns rows as dictionaries."""
+    if DATABASE_URL:
+        return conn.cursor(cursor_factory=RealDictCursor)
+    else:
+        return conn.cursor()
+
+@app.teardown_appcontext
+def close_connection(exception):
+    """हर अनुरोध के बाद डेटाबेस कनेक्शन बंद करें।"""
+    if DATABASE_URL:
+        conn = getattr(g, '_database_pg', None)
+    else:
+        conn = getattr(g, '_database', None)
+    if conn is not None:
+        conn.close()
+
+def init_db():
+    """डेटाबेस को इनिशियलाइज़ करें और टेबल बनाएं।"""
+    conn = get_db_connection()
+    # उपयोगकर्ता टेबल
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT NOT NULL UNIQUE,
+            password TEXT NOT NULL,
+            role TEXT NOT NULL, -- 'admin', 'bidder'
+            is_approved INTEGER NOT NULL DEFAULT 0,
+            team_id INTEGER,
+            can_bid INTEGER DEFAULT 0,
+            discord_name TEXT,
+            base_price REAL,
+            game_level TEXT,
+            FOREIGN KEY (team_id) REFERENCES teams (id)
+        )
+    """)
+    # टीम टेबल
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS teams (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL UNIQUE,
+            budget REAL NOT NULL DEFAULT 0
+        )
+    """)
+    # Check if 'budget' column exists in 'teams' table and add it if not
+    cursor = conn.execute("PRAGMA table_info(teams)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if 'budget' not in columns:
+        conn.execute("ALTER TABLE teams ADD COLUMN budget REAL NOT NULL DEFAULT 0")
+        print("Added 'budget' column to 'teams' table.") # For debugging
+    # ऑक्शन टेबल में highest_bidding_team_id जोड़ा गया
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS auctions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            current_price REAL NOT NULL,
+            highest_bidding_team_id INTEGER,
+            status TEXT NOT NULL,      -- 'live' or 'closed'
+            FOREIGN KEY (highest_bidding_team_id) REFERENCES teams (id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS sold_players (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            player_name TEXT NOT NULL,
+            winning_team_id INTEGER NOT NULL,
+            sold_price REAL NOT NULL,
+            FOREIGN KEY (winning_team_id) REFERENCES teams (id)
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS activity_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        )
+    """)
+    # System settings table for global flags
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        )
+    """)
+    
+    conn.commit()
+
+# एप्लिकेशन शुरू होने पर डेटाबेस और एडमिन उपयोगकर्ता को इनिशियलाइज़ करें
+with app.app_context():
+    init_db()
+    # सुनिश्चित करें कि एक डिफ़ॉल्ट एडमिन यूज़र मौजूद है
+    conn = get_db_connection()
+    cursor = conn.execute("SELECT id FROM users WHERE username = 'admin'")
+    admin = cursor.fetchone()
+    if admin is None:
+        # पासवर्ड को हैश किया गया
+        hashed_password = generate_password_hash('adminpass')
+        conn.execute(
+            "INSERT INTO users (username, password, role, is_approved, team_id, can_bid) VALUES (?, ?, ?, ?, ?, ?)",
+            ('admin', hashed_password, 'admin', True, None, 0)
+        )
+        conn.commit()
+    # Ensure default registration status is set
+    cursor = conn.execute("SELECT value FROM system_settings WHERE key = 'registration_open_until'")
+    if cursor.fetchone() is None:
+        conn.execute("INSERT INTO system_settings (key, value) VALUES (?, ?)", ('registration_open_until', '0'))
+        conn.commit()
+    # Ensure default team budget is set
+    cursor = conn.execute("SELECT value FROM system_settings WHERE key = 'default_team_budget'")
+    if cursor.fetchone() is None:
+        conn.execute("INSERT INTO system_settings (key, value) VALUES (?, ?)", ('default_team_budget', '100000.0'))
+        conn.commit()
+
+# --- User Authentication and Role Management ---
+
+def is_admin():
+    return session.get('role') == 'admin'
+
+def get_current_user():
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    if DATABASE_URL:
+        cur.execute("SELECT * FROM users WHERE username = %s", (session.get('username'),))
+    else:
+        cur.execute("SELECT * FROM users WHERE username = ?", (session.get('username'),))
+    user = cur.fetchone()
+    return user
+
+def is_approved_bidder():
+    user = get_current_user()
+    return session.get('role') == 'bidder' and user and user['is_approved']
+
+
+def broadcast_stats():
+    """Calculates and broadcasts auction stats to all clients."""
+    with app.app_context():
+        conn = get_db_connection() # Get a new connection for this context
+        cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+        if DATABASE_URL:
+            cur.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
+            total_players = cur.fetchone()['count']
+            cur.execute("SELECT COUNT(id) FROM sold_players")
+            sold_players_count = cur.fetchone()['count']
+            cur.execute("SELECT COUNT(id) FROM auctions WHERE status = 'Unsold'")
+        else:
+            cur.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
+            total_players = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(id) FROM sold_players")
+            sold_players_count = cur.fetchone()[0]
+            cur.execute("SELECT COUNT(id) FROM auctions WHERE status = 'Unsold'")
+            unsold_auctions_count = cur.fetchone()[0]
+        unsold_players = unsold_auctions_count # Simplified logic
+        stats = {'total_players': total_players, 'sold_players': sold_players_count, 'unsold_players': unsold_players}
+        socketio.emit('stats_update', stats)
+
+def log_activity(message):
+    """Broadcasts a generic activity message to all clients."""
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    timestamp = time.strftime('%H:%M:%S')
+    if DATABASE_URL:
+        cur.execute("INSERT INTO activity_log (message, timestamp) VALUES (%s, %s)", (message, timestamp))
+    else:
+        cur.execute("INSERT INTO activity_log (message, timestamp) VALUES (?, ?)", (message, timestamp))
+    cur.close()
+    conn.commit()
+    activity_data = { 
+        'message': message,
+        'timestamp': time.strftime('%H:%M:%S')
+    }
+    socketio.emit('new_activity', activity_data)
+
+
+# --- Routes ---
+
+@app.route('/')
+def index():
+    if 'username' not in session:
+        return redirect(url_for('login'))
+    
+    user = get_current_user()
+    if not user:
+        session.clear()
+        return redirect(url_for('login'))
+
+    if is_admin(): # If admin, redirect to admin dashboard
+        return redirect(url_for('admin_dashboard'))
+    
+    conn = get_db_connection()
+    
+    # यूज़र की टीम का नाम प्राप्त करें
+    team_name = "Not Assigned"
+    team_budget = 0
+    if user['team_id']:
+        team = conn.execute("SELECT name, budget FROM teams WHERE id = ?", (user['team_id'],)).fetchone() 
+        if team:
+            team_name = team['name']
+            team_budget = team['budget']
+
+    sold_players_by_team_list = conn.execute("""
+        SELECT t.name as team_name, sp.player_name
+        FROM sold_players sp
+        JOIN teams t ON sp.winning_team_id = t.id
+        ORDER BY t.name, sp.player_name
+    """).fetchall()
+    sold_players_by_team = {}
+
+    for player in sold_players_by_team_list:
+        if player['team_name'] not in sold_players_by_team:
+            sold_players_by_team[player['team_name']] = []
+        sold_players_by_team[player['team_name']].append(player['player_name'])
+    # टीम का नाम पाने के लिए जॉइन करें
+    auctions = conn.execute("""
+        SELECT a.id, a.title, a.current_price, a.status, t.name as highest_bidder_username FROM auctions a
+        LEFT JOIN teams t ON a.highest_bidding_team_id = t.id
+        WHERE a.status = 'live'
+    """).fetchall()
+    
+    all_teams = conn.execute("SELECT name FROM teams").fetchall()
+
+    total_players = conn.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL").fetchone()[0]
+    sold_players = conn.execute("SELECT COUNT(id) FROM sold_players").fetchone()[0]
+    unsold_players = total_players - sold_players
+
+    return render_template('auction_feed.html', 
+                           auctions=auctions, 
+                           current_username=session.get('username'),
+                           team_name=team_name,
+                           team_budget=team_budget,
+                           can_bid=user['can_bid'],
+                           all_teams=all_teams,
+                           sold_players_by_team=sold_players_by_team,
+                           total_players = total_players,
+                           sold_players=sold_players,
+                           unsold_players=unsold_players)
+
+@app.route('/register', methods=('GET', 'POST'))
+def register():
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    cur.execute("SELECT value FROM system_settings WHERE key = 'registration_open_until'")
+    setting = cur.fetchone()
+
+    registration_open = False
+    open_until_timestamp = 0.0
+    if setting:
+        open_until_timestamp = float(setting['value'])
+        if time.time() < open_until_timestamp:
+            registration_open = True
+
+
+    if not registration_open:
+        return render_template('register.html', 
+                               error="Player registration is currently closed. Please check back later.", 
+                               registration_closed=True)
+
+    if request.method == 'POST':
+        username = request.form['username']
+        password_hash = generate_password_hash(request.form['password'])
+        discord_name = request.form['discord_name']
+        base_price = float(request.form['base_price'])
+        game_level = request.form['game_level']
+
+        try:
+            if DATABASE_URL:
+                cur.execute("INSERT INTO users (username, password, role, is_approved, discord_name, base_price, game_level) VALUES (%s, %s, %s, %s, %s, %s, %s)", (username, password_hash, 'bidder', True, discord_name, base_price, game_level))
+            else:
+                cur.execute("INSERT INTO users (username, password, role, is_approved, discord_name, base_price, game_level) VALUES (?, ?, ?, ?, ?, ?, ?)", (username, password_hash, 'bidder', 1, discord_name, base_price, game_level))
+
+            conn.commit()
+            # Broadcast updated stats
+            broadcast_stats()
+            log_activity(f"New player '{username}' has registered.")
+            cur.close()
+            return redirect(url_for('login', message="Registration successful! You can now log in."))
+
+        except sqlite3.IntegrityError:
+            return render_template('register.html', error="Username already exists.")
+
+    return render_template('register.html', registration_open_until=open_until_timestamp)
+
+@app.route('/register_team', methods=['GET', 'POST'])
+def register_team():
+    if not is_admin():
+        return redirect(url_for('index'))
+    if request.method == 'POST':
+        team_name = request.form['team_name'].strip()
+        password = request.form['password']
+        if not team_name or not password:
+            return redirect(url_for('manage_teams', error="Team name and password cannot be empty."))
+        conn = get_db_connection()
+        cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+        try:
+            cur.execute("SELECT value FROM system_settings WHERE key = 'default_team_budget'")
+            default_budget = cur.fetchone()['value']
+            if DATABASE_URL:
+                cur.execute("INSERT INTO teams (name, budget) VALUES (%s, %s) RETURNING id", (team_name, float(default_budget)))
+                team_id = cur.fetchone()['id']
+            else:
+                cur.execute("INSERT INTO teams (name, budget) VALUES (?, ?)", (team_name, float(default_budget)))
+                team_id = cur.lastrowid
+            password_hash = generate_password_hash(password)
+            if DATABASE_URL:
+                cur.execute("INSERT INTO users (username, password, role, is_approved, team_id, can_bid) VALUES (%s, %s, %s, %s, %s, %s)", (team_name, password_hash, 'bidder', True, team_id, True))
+            else:
+                cur.execute("INSERT INTO users (username, password, role, is_approved, team_id, can_bid) VALUES (?, ?, ?, ?, ?, ?)", (team_name, password_hash, 'bidder', 1, team_id, 1))
+
+            conn.commit()
+            team_data = {'name': team_name, 'budget': float(default_budget)}
+            socketio.emit('new_team_added', team_data)
+            log_activity(f"A new team has been created: '{team_name}'.")
+            return redirect(url_for('manage_teams', success=f"Team '{team_name}' created successfully."))
+        except sqlite3.IntegrityError:
+            return redirect(url_for('manage_teams', error=f"Team name '{team_name}' already exists."))
+    return redirect(url_for('manage_teams'))
+
+@app.route('/login_player', methods=('GET', 'POST'))
+def login_player(): # This is the player login route 
+    message = request.args.get('message')
+    
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        
+        conn = get_db_connection()
+        cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+        # Allow admin or players (users with base_price) to log in here
+        if DATABASE_URL:
+            cur.execute("SELECT * FROM users WHERE username = %s AND (role = 'admin' OR base_price IS NOT NULL)", (username,))
+        else:
+            cur.execute("SELECT * FROM users WHERE username = ? AND (role = 'admin' OR base_price IS NOT NULL)", (username,))
+        user = cur.fetchone()
+        
+        if user and check_password_hash(user['password'], password): # FIX: हैश किए गए पासवर्ड की जांच करें
+            session['username'] = user['username']
+            session['role'] = user['role']
+            if user['role'] == 'bidder' and user['team_id']: # Store team_id for players if assigned
+                session['team_id'] = user['team_id']
+            return redirect(url_for('index'))
+        else:
+            message = "Invalid username or password."
+            error = "Invalid username or password."
+        cur.close()
+            
+    return render_template('login_player.html', error=message, message=message)
+
+
+@app.route('/login', methods=('GET', 'POST'))
+def login():
+    # This route will now redirect to the player login page by default.
+    return redirect(url_for('login_player'))
+
+@app.route('/login_team', methods=('GET', 'POST'))
+def login_team():
+
+    message = request.args.get('message') 
+    if request.method == 'POST':
+        username = request.form['username']
+        password = request.form['password']
+        conn = get_db_connection() # Get a new connection for this context
+        cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+        if DATABASE_URL:
+            cur.execute("SELECT * FROM users WHERE username = %s AND role = 'bidder' AND base_price IS NULL", (username,))
+        else:
+            cur.execute("SELECT * FROM users WHERE username = ? AND role = 'bidder' AND base_price IS NULL", (username,))
+        user = cur.fetchone() # Ensure only team users (bidder role, no base_price) can log in here
+        if user and check_password_hash(user['password'], password):
+            session['username'] = user['username']
+            session['role'] = user['role']
+            session['team_id'] = user['team_id']
+            cur.close()
+            return redirect(url_for('index'))
+        else:
+            error = "Invalid team username or password."
+            cur.close()
+            return render_template('login_team.html', error=error)
+    return render_template('login_team.html', message=message) # For GET requests
+
+@app.route('/logout')
+def logout():
+    session.clear()
+    return redirect(url_for('login')) # Redirect to the main login page
+
+
+# --- Admin Routes ---
+
+@app.route('/admin')
+def admin_dashboard():
+    if not is_admin():
+        return redirect(url_for('index'))
+
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    cur.execute("""
+        SELECT a.id, a.title, a.current_price, a.status, t.name as highest_bidder_username
+        FROM auctions a
+        LEFT JOIN teams t ON a.highest_bidding_team_id = t.id
+        ORDER BY a.id DESC
+    """)
+    all_auctions = cur.fetchall() # Fetch all results
+    cur.execute("SELECT id, name FROM teams")
+    teams = cur.fetchall() # Fetch all results
+
+    # खिलाड़ी जो नीलामी के लिए तैयार हैं (पंजीकृत, स्वीकृत लेकिन अभी तक नीलाम नहीं हुए) 
+    cur.execute("""
+        SELECT u.id, u.username, u.discord_name, u.base_price, u.game_level
+        FROM users u LEFT JOIN auctions a ON u.username = a.title
+        WHERE u.role = 'bidder' AND a.id IS NULL AND u.base_price IS NOT NULL
+        ORDER BY u.id DESC
+    """)
+    players_ready_for_auction = cur.fetchall() # Fetch all results
+
+    if DATABASE_URL:
+        cur.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
+        total_players = cur.fetchone()['count']
+        cur.execute("SELECT COUNT(id) FROM sold_players")
+        sold_players = cur.fetchone()['count']
+    else:
+        cur.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
+        total_players = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(id) FROM sold_players")
+        sold_players = cur.fetchone()[0]
+
+    unsold_players = total_players - sold_players
+    
+    cur.execute("""
+        SELECT a.id, a.title, u.discord_name, u.base_price, u.game_level
+        FROM auctions a
+        JOIN users u ON a.title = u.username
+        WHERE a.status = 'Unsold'
+    """)
+    unsold_auctions = cur.fetchall() # Fetch all results
+
+    # Get registration status
+    cur.execute("SELECT value FROM system_settings WHERE key = 'registration_open_until'")
+    setting = cur.fetchone()
+    registration_status = 'closed'
+    registration_ends_at = None
+    if setting:
+        open_until_timestamp = float(setting['value'])
+        if time.time() < open_until_timestamp:
+            registration_status = 'open'
+            ends_dt = datetime.fromtimestamp(open_until_timestamp)
+            registration_ends_at = ends_dt.strftime('%Y-%m-%d %H:%M:%S')
+
+    registration_status_display = "Open" if registration_status == 'open' else "Closed"
+
+    # Get default budget
+    cur.execute("SELECT value FROM system_settings WHERE key = 'default_team_budget'")
+    default_budget_setting = cur.fetchone()
+    default_team_budget = float(default_budget_setting['value']) if default_budget_setting else 0.0
+
+    cur.execute("SELECT id, name, budget FROM teams ORDER BY name")
+    teams_with_budgets = cur.fetchall() # Fetch all results
+    cur.close() # Close cursor after all queries
+
+
+    return render_template('admin_dashboard.html', 
+                           auctions=all_auctions,
+                           teams=teams,
+                           players_ready_for_auction=players_ready_for_auction,
+                           total_players=total_players,
+                           teams_with_budgets=teams_with_budgets,
+                           default_team_budget=default_team_budget,
+                           sold_players=sold_players,
+                           unsold_players=unsold_players, # This is a count
+                           unsold_auctions=unsold_auctions, # This is the list of auctions
+                           registration_status=registration_status,
+                           registration_status_display=registration_status_display,
+                           registration_ends_at=registration_ends_at)
+
+def mark_as_unsold(auction_id):
+    """यदि कोई बोली नहीं लगाई जाती है तो नीलामी को 'Unsold' के रूप में चिह्नित करता है।"""
+    with app.app_context():
+        conn = get_db_connection()
+        # जांचें कि क्या नीलामी अभी भी मौजूद है और कोई बोली नहीं लगी है
+        auction = conn.execute("SELECT * FROM auctions WHERE id = ? AND status = 'live'", (auction_id,)).fetchone()
+        if auction and auction['highest_bidding_team_id'] is None:
+            conn.execute("UPDATE auctions SET status = 'Unsold' WHERE id = ?", (auction_id,))
+            conn.commit()
+            log_activity(f"Player '{auction['title']}' went unsold as no bids were placed.")
+            socketio.emit('player_unsold', {'auction_id': auction_id, 'player_name': auction['title']})
+            broadcast_stats()
+
+@app.route('/admin/toggle_registration', methods=['POST'])
+def toggle_registration():
+    if not is_admin():
+        return redirect(url_for('index'))
+
+    action = request.form.get('action')
+    conn = get_db_connection()
+
+    if action == 'open':
+        # Set registration to be open for the next 24 hours
+        open_until = time.time() + (24 * 60 * 60)
+        conn.execute("UPDATE system_settings SET value = ? WHERE key = 'registration_open_until'", (str(open_until),))
+        log_activity("Admin has opened player registration for 24 hours.")
+    elif action == 'close':
+        # Close registration immediately
+        conn.execute("UPDATE system_settings SET value = '0' WHERE key = 'registration_open_until'")
+        log_activity("Admin has closed player registration.")
+    
+    conn.commit()
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/update_budget', methods=['POST'])
+def update_budget():
+    if not is_admin():
+        return redirect(url_for('index'))
+
+    new_budget = request.form.get('default_budget')
+    conn = get_db_connection() # Get a new connection for this context
+    cur = conn.cursor()
+    if DATABASE_URL:
+        cur.execute("UPDATE system_settings SET value = %s WHERE key = 'default_team_budget'", (new_budget,))
+    else:
+        cur.execute("UPDATE system_settings SET value = ? WHERE key = 'default_team_budget'", (new_budget,))
+    cur.close()
+    conn.commit()
+    log_activity(f"Admin updated the default team budget to ₹{float(new_budget):.2f}.")
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/update_team_budget', methods=['POST'])
+def update_team_budget():
+    if not is_admin():
+        return redirect(url_for('index'))
+
+    team_id = request.form.get('team_id')
+    new_budget = request.form.get('new_budget')
+
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    if DATABASE_URL:
+        cur.execute("UPDATE teams SET budget = %s WHERE id = %s", (new_budget, team_id))
+    else:
+        cur.execute("UPDATE teams SET budget = ? WHERE id = ?", (new_budget, team_id))
+    conn.commit()
+    log_activity(f"Admin updated team id '{team_id}' budget to {new_budget}.")
+    cur.close()
+
+    return redirect(url_for('manage_teams'))
+
+@app.route('/admin/reauction/<int:auction_id>', methods=['POST'])
+def reauction_player(auction_id):
+    """एक बिना बिके खिलाड़ी को फिर से नीलाम करता है।"""
+    if not is_admin():
+        return redirect(url_for('index'))
+
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    if DATABASE_URL:
+        cur.execute("SELECT * FROM auctions WHERE id = %s AND status = 'Unsold'", (auction_id,))
+    else:
+        cur.execute("SELECT * FROM auctions WHERE id = ? AND status = 'Unsold'", (auction_id,))
+    auction = cur.fetchone()
+
+    if not auction:
+        return "Unsold auction not found", 404
+
+    if DATABASE_URL:
+        cur.execute("SELECT * FROM users WHERE username = %s", (auction['title'],))
+    else:
+        cur.execute("SELECT * FROM users WHERE username = ?", (auction['title'],))
+    player = cur.fetchone()
+    if not player:
+        return "Player for this auction not found", 404
+
+    # नीलामी को रीसेट करें
+    if DATABASE_URL:
+        cur.execute("UPDATE auctions SET status = 'live', current_price = %s, highest_bidding_team_id = NULL WHERE id = %s", (player['base_price'], auction_id))
+    else:
+        cur.execute("UPDATE auctions SET status = 'live', current_price = ?, highest_bidding_team_id = NULL WHERE id = ?", (player['base_price'], auction_id))
+
+    conn.commit()
+
+    # Re-emit the new_auction event to make it appear on all feeds
+    socketio.emit('new_auction', {
+        'id': auction_id,
+        'title': auction['title'],
+        'price': player['base_price'],
+        'discord_name': player['discord_name'],
+        'base_price': player['base_price'],
+        'game_level': player['game_level'],
+        'time_left': NO_BID_DURATION
+    })
+    log_activity(f"Player '{auction['title']}' is being re-auctioned.")
+    # 60-सेकंड का 'नो-बिड' टाइमर फिर से शुरू करें
+    timer_thread = Timer(NO_BID_DURATION, mark_as_unsold, args=[auction_id])
+    timer_thread.start()
+    # Store the timer thread and its end time
+    end_time = time.time() + NO_BID_DURATION
+    active_bids[auction_id] = {'thread': timer_thread, 'end_time': end_time}
+    
+    cur.close()
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/start_player_auction/<int:user_id>', methods=['POST'])
+def start_player_auction(user_id): # पंजीकृत उपयोगकर्ता (खिलाड़ी) के लिए नीलामी शुरू करता है।
+    if not is_admin():
+        return redirect(url_for('index'))
+    
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    if DATABASE_URL:
+        cur.execute("SELECT * FROM users WHERE id = %s AND role = 'bidder'", (user_id,))
+    else:
+        cur.execute("SELECT * FROM users WHERE id = ? AND role = 'bidder'", (user_id,))
+    player = cur.fetchone()
+    
+    if not player:
+        return "Player not found", 404
+    
+    # जांचें कि क्या इस खिलाड़ी के लिए पहले से ही कोई नीलामी चल रही है
+    if DATABASE_URL:
+        cur.execute("SELECT id FROM auctions WHERE title = %s", (player['username'],))
+    else:
+        cur.execute("SELECT id FROM auctions WHERE title = ?", (player['username'],))
+    existing_auction = cur.fetchone()
+    if existing_auction:
+        cur.close()
+        return redirect(url_for('admin_dashboard', error=f"Auction for {player['username']} already exists."))
+
+    # खिलाड़ी के लिए एक नई नीलामी बनाएँ
+    if DATABASE_URL:
+        cur.execute("INSERT INTO auctions (title, current_price, status) VALUES (%s, %s, %s) RETURNING id", (player['username'], player['base_price'], 'live'))
+        auction_id = cur.fetchone()['id']
+    else:
+        cur.execute("INSERT INTO auctions (title, current_price, status) VALUES (?, ?, ?)", (player['username'], player['base_price'], 'live'))
+        auction_id = cur.lastrowid
+    conn.commit()
+    
+    # सभी को नई नीलामी के बारे में सूचित करें
+    auction_id = conn.execute("SELECT id FROM auctions WHERE title = ?", (player['username'],)).fetchone()['id']
+    socketio.emit('new_auction', {
+        'id': auction_id,
+        'title': player['username'],
+        'price': player['base_price'],
+        'discord_name': player['discord_name'],
+        'base_price': player['base_price'],
+        'game_level': player['game_level'],
+        'time_left': NO_BID_DURATION
+    })
+    cur.close()
+    log_activity(f"Auction started for player '{player['username']}' with a base price of ₹{player['base_price']:.2f}.")
+
+    # 60-सेकंड का 'नो-बिड' टाइमर शुरू करें
+    timer_thread = Timer(NO_BID_DURATION, mark_as_unsold, args=[auction_id])
+    timer_thread.start()
+    # Store the timer thread and its end time
+    # auction_id is already set from the RETURNING id clause above
+    end_time = time.time() + NO_BID_DURATION
+    active_bids[auction_id] = {'thread': timer_thread, 'end_time': end_time}
+
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/admin/add_auction', methods=['POST'])
+def add_auction():
+    if not is_admin():
+        return redirect(url_for('index'))
+    
+    title = request.form['title']
+    starting_price = float(request.form['price'])
+    
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    if DATABASE_URL:
+        cur.execute("INSERT INTO auctions (title, current_price, status) VALUES (%s, %s, %s)", (title, starting_price, 'live'))
+    else:
+        cur.execute("INSERT INTO auctions (title, current_price, status) VALUES (?, ?, ?)", (title, starting_price, 'live'))
+
+    conn.commit()
+    cur.close()
+    
+    socketio.emit('new_auction', {'title': title, 'price': starting_price})
+    
+    return redirect(url_for('admin_dashboard'))
+
+@app.route('/manage_teams')
+def manage_teams():
+    if not is_admin():
+        return redirect(url_for('index'))
+    
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    # सभी टीमों और उनके सदस्यों को प्राप्त करें
+    if DATABASE_URL:
+        cur.execute("""
+            SELECT t.id, t.name, t.budget, STRING_AGG(sp.player_name, ', ') as members
+            FROM teams t 
+            LEFT JOIN sold_players sp ON sp.winning_team_id = t.id
+            GROUP BY t.id, t.name, t.budget
+            ORDER BY t.name
+        """)
+    else: # SQLite
+        cur.execute("""
+            SELECT t.id, t.name, t.budget, (
+                SELECT GROUP_CONCAT(sp.player_name, ', ')
+                FROM sold_players sp
+                WHERE sp.winning_team_id = t.id
+            ) as members
+            FROM teams t 
+            ORDER BY t.name
+        """)
+    teams_with_budgets = cur.fetchall() # Fetch all results
+
+    cur.execute("""
+        SELECT t.name as team_name, sp.player_name, sp.sold_price
+        FROM sold_players sp
+        JOIN teams t ON sp.winning_team_id = t.id
+        ORDER BY t.name, sp.player_name
+    """)
+    sold_players_by_team = cur.fetchall() # Fetch all results
+    
+    cur.execute("SELECT id, name FROM teams ORDER BY name")
+    all_teams = cur.fetchall() # Fetch all results
+    cur.close() # Close cursor after all queries
+
+    return render_template('manage_teams.html', 
+                           teams_with_budgets=teams_with_budgets,
+                           all_teams=all_teams,
+                           sold_players=sold_players_by_team,
+                           error=request.args.get('error'))
+
+@app.route('/download_sold_players')
+def download_sold_players():
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    cur.execute("""
+        SELECT sp.player_name, t.name as team_name, sp.sold_price
+        FROM sold_players sp
+        JOIN teams t ON sp.winning_team_id = t.id
+        ORDER BY t.name, sp.player_name
+    """)
+    sold_players_data = cur.fetchall() # Fetch all results
+    cur.close() # Close cursor
+    # Create a CSV in memory
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    # Write header
+    writer.writerow(['Player Name', 'Team Name', 'Sold Price (₹)'])
+
+    # Write data
+    for player in sold_players_data:
+        writer.writerow([player['player_name'], player['team_name'], player['sold_price']])
+
+    output.seek(0)
+
+    return Response(
+        output,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment;filename=sold_players.csv"}
+    )
+# --- SocketIO for Live Bidding ---
+
+@app.route('/download_team_roster')
+def download_team_roster():
+
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+    if DATABASE_URL:
+        cur.execute("""
+            SELECT t.name, t.budget, STRING_AGG(sp.player_name, ', ') as members
+            FROM teams t 
+            LEFT JOIN sold_players sp ON sp.winning_team_id = t.id
+            GROUP BY t.id, t.name, t.budget
+            ORDER BY t.name
+        """)
+    else: # SQLite
+        cur.execute("""
+            SELECT t.name, t.budget, (
+                SELECT GROUP_CONCAT(sp.player_name, ', ')
+                FROM sold_players sp
+                WHERE sp.winning_team_id = t.id
+            ) as members
+            FROM teams t 
+            ORDER BY t.name
+        """)
+    teams_data = cur.fetchall() # Fetch all results
+    cur.close() # Close cursor
+    output = io.StringIO()
+    writer = csv.writer(output)
+
+    writer.writerow(['Team Name', 'Budget Remaining (₹)', 'Players Bought'])
+
+    for team in teams_data:
+        writer.writerow([team['name'], team['budget'], team['members'] or ''])
+
+    output.seek(0)
+
+    return Response(
+        output,
+        mimetype="text/csv",
+        headers={"Content-Disposition": "attachment;filename=team_roster.csv"}
+    )
+
+active_bids = {}  # ऑक्शन ID के अनुसार एक्टिव बिड को ट्रैक करें
+BID_DURATION = 15 # सेकंड में बिड की अवधि
+NO_BID_DURATION = 120 # सेकंड में, अगर कोई बोली नहीं लगती है
+def end_bidding(auction_id):
+    """बिडिंग अवधि समाप्त होने पर कॉल किया जाने वाला फ़ंक्शन।"""
+    with app.app_context():
+        print(f"ऑक्शन {auction_id} के लिए बिडिंग अवधि समाप्त हो गई।")
+        conn = get_db_connection() # Get a new connection for this context
+        cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+        
+        # विजेता टीम और अंतिम मूल्य प्राप्त करें
+        if DATABASE_URL:
+            cur.execute("SELECT * FROM auctions WHERE id = %s", (auction_id,))
+        else:
+            cur.execute("SELECT * FROM auctions WHERE id = ?", (auction_id,))
+        auction = cur.fetchone()
+        
+        if auction and auction['highest_bidding_team_id']:
+            winning_team_id = auction['highest_bidding_team_id']
+            sold_price = auction['current_price']
+            player_name = auction['title']
+
+            # नीलामी की स्थिति को 'Sold' में बदलें
+            if DATABASE_URL:
+                cur.execute("UPDATE auctions SET status = 'Sold' WHERE id = %s", (auction_id,))
+                cur.execute("INSERT INTO sold_players (player_name, winning_team_id, sold_price) VALUES (%s, %s, %s)", (player_name, winning_team_id, sold_price))
+                cur.execute("SELECT id FROM users WHERE username = %s", (player_name,))
+            else:
+                cur.execute("UPDATE auctions SET status = 'Sold' WHERE id = ?", (auction_id,))
+                cur.execute("INSERT INTO sold_players (player_name, winning_team_id, sold_price) VALUES (?, ?, ?)", (player_name, winning_team_id, sold_price))
+                cur.execute("SELECT id FROM users WHERE username = ?", (player_name,))
+
+            player_user = cur.fetchone()
+            if player_user:
+                if DATABASE_URL:
+                    cur.execute("UPDATE users SET team_id = %s WHERE id = %s", (winning_team_id, player_user['id']))
+                else:
+                    cur.execute("UPDATE users SET team_id = ? WHERE id = ?", (winning_team_id, player_user['id']))
+
+            # टीम का बजट अपडेट करें
+            if DATABASE_URL:
+                cur.execute("UPDATE teams SET budget = budget - %s WHERE id = %s", (sold_price, winning_team_id))
+            else:
+                cur.execute("UPDATE teams SET budget = budget - ? WHERE id = ?", (sold_price, winning_team_id))
+
+            conn.commit()
+
+            if DATABASE_URL:
+                cur.execute("SELECT name, budget FROM teams WHERE id = %s", (winning_team_id,))
+            else:
+                cur.execute("SELECT name, budget FROM teams WHERE id = ?", (winning_team_id,))
+
+            winning_team = cur.fetchone()
+            # सभी क्लाइंट को सूचित करें कि खिलाड़ी बिक गया है
+            socketio.emit('player_sold', {
+                'auction_id': auction_id, 'player_name': player_name, 
+                'team_name': winning_team['name'], 'price': sold_price,
+                'winning_team_id': winning_team_id, 'new_budget': winning_team['budget']
+            })
+            # Broadcast updated stats
+            log_activity(f"Player '{player_name}' was sold to '{winning_team['name']}' for ₹{sold_price:.2f}.")
+            broadcast_stats() # This will get a new connection and cursor
+
+        # सक्रिय बिड से ऑक्शन को हटा दें
+        if auction_id in active_bids:
+            active_bids.pop(auction_id, None)
+
+
+
+@socketio.on('connect')
+def handle_connect(auth=None): # auth पैरामीटर जोड़ा गया
+    if 'username' in session:
+        # Send activity history to the newly connected client
+        conn = get_db_connection()
+        cur = get_dict_cursor(conn) if DATABASE_URL else conn.cursor()
+        if DATABASE_URL:
+            cur.execute("SELECT message, timestamp FROM activity_log ORDER BY id DESC LIMIT 50")
+        else:
+            cur.execute("SELECT message, timestamp FROM activity_log ORDER BY id DESC LIMIT 50")
+        history = cur.fetchall() # Fetch all results
+        # The list is fetched in descending order, so we reverse it for correct display order
+        history_data = [{'message': row['message'], 'timestamp': row['timestamp']} for row in reversed(history)]
+        emit('activity_history', history_data)
+        print(f"User {session['username']} connected.")
+
+@socketio.on('get_all_timers')
+def handle_get_all_timers():
+    """क्लाइंट को सभी सक्रिय टाइमर की वर्तमान स्थिति भेजता है।"""
+    timer_statuses = {}
+    current_time = time.time()
+    # Use list(active_bids.items()) to avoid runtime errors if the dictionary is modified during iteration
+    for auction_id, timer_info in list(active_bids.items()):
+        if timer_info and timer_info['thread'].is_alive():
+            timer_statuses[auction_id] = max(0, int(timer_info['end_time'] - current_time))
+    emit('all_timers_status', timer_statuses)
+
+@socketio.on('place_bid')
+def handle_place_bid(data):
+    username = session.get('username')
+    
+    if not username or not is_approved_bidder():
+        emit('bid_status', {'success': False, 'message': 'Approval pending or not authorized.', 'auction_id': data.get('auction_id')})
+        return
+ 
+    auction_id = data.get('auction_id')
+    new_bid = float(data.get('bid_amount'))
+    
+    conn = get_db_connection()
+
+    # यूज़र और उसकी टीम की जानकारी प्राप्त करें
+    user = conn.execute("SELECT u.*, t.budget FROM users u JOIN teams t ON u.team_id = t.id WHERE u.username = ?", (username,)).fetchone()
+    if not user or not user['team_id'] or not user['can_bid']:
+        emit('bid_status', {'success': False, 'message': 'You are not assigned to a team.'})
+        return
+
+    # बजट जांचें
+    team_budget = user['budget']
+    if new_bid > team_budget:
+        emit('bid_status', {'success': False, 'message': f'Bid exceeds your team budget of {team_budget:.2f}.', 'auction_id': auction_id})
+        return
+
+    auction = conn.execute("SELECT * FROM auctions WHERE id = ?", (auction_id,)).fetchone()
+    
+    if auction and auction['status'] == 'live':
+        current_price = auction['current_price']
+        
+        if new_bid > current_price:
+             # अगर कोई सक्रिय बिड पहले से है, तो उसे रद्द कर दें
+            if auction_id in active_bids and active_bids[auction_id]['thread']:
+                active_bids[auction_id]['thread'].cancel()
+
+            conn.execute("UPDATE auctions SET current_price = ?, highest_bidding_team_id = ? WHERE id = ?", 
+                         (new_bid, user['team_id'], auction_id))
+            conn.commit()
+            
+            team = conn.execute("SELECT name FROM teams WHERE id = ?", (user['team_id'],)).fetchone()
+
+            # बिडिंग अवधि के लिए एक टाइमर सेट करें
+            timer_thread = Timer(BID_DURATION, end_bidding, args=[auction_id])
+            timer_thread.start()
+            end_time = time.time() + BID_DURATION
+            active_bids[auction_id] = {'thread': timer_thread, 'end_time': end_time}
+
+
+            socketio.emit('auction_update', {
+                'auction_id': auction_id,
+                'new_price': new_bid,
+                'bidder': team['name'], # टीम का नाम भेजें
+                'time_left': BID_DURATION
+            })
+
+            emit('bid_status', {'success': True, 'message': f'Bid of {new_bid} placed for {team["name"]}!', 'auction_id': auction_id})
+            
+            # लाइव गतिविधि फ़ीड के लिए इवेंट भेजें
+            log_activity(f"Team '{team['name']}' bid ₹{new_bid:.2f} on '{auction['title']}'.")
+
+
+
+
+
+        else:
+            emit('bid_status', {'success': False, 'message': f'Bid must be strictly higher than the current price: {current_price}', 'auction_id': auction_id})
+    else:
+        emit('bid_status', {'success': False, 'message': 'Auction is not live or does not exist.', 'auction_id': auction_id})
+        
+
+if __name__ == '__main__':
+    socketio.run(app, host='0.0.0.0', port=int(os.getenv('PORT', 5000)), debug=True)

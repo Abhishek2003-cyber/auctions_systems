@@ -1,0 +1,432 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Auction Feed</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            @apply bg-indigo-50 dark:bg-gray-900 text-gray-800 dark:text-gray-200;
+        }
+    </style>
+</head>
+<body class="p-4 sm:p-8">
+    <div class="max-w-6xl mx-auto mt-10">
+        <header class="mb-8 flex justify-between items-center border-b border-gray-300 dark:border-gray-700 pb-4">
+            <h1 class="text-4xl font-extrabold text-indigo-800">Live Bid Feed</h1>
+            <div class="flex items-center space-x-6">
+                <p class="text-sm font-medium text-gray-600">
+                    User: <span class="font-bold text-indigo-700">{{ session.username }}</span>
+                    <br>
+                    Team: <span class="font-bold text-purple-700 dark:text-purple-400">{{ team_name or "N/A" }}</span>
+                    <br>
+                    Budget: <span id="team-budget" class="font-bold text-green-600 dark:text-green-400">₹{{ '%.2f' | format(team_budget) }}</span>
+                </p>
+                <a href="{{ url_for('logout') }}" class="text-sm text-red-500 hover:text-red-700 font-medium transition duration-150 p-2 rounded-lg border border-red-500 dark:text-red-400 dark:border-red-500 dark:hover:text-red-300">Logout</a>
+            </div>
+        </header>
+
+        <!-- Auction Stats -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
+            <div class="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg text-center border-2 border-blue-200 dark:border-blue-700">
+                <h3 class="text-sm font-semibold text-gray-500">Total Registered Players</h3>
+                <p id="total-players" class="text-3xl font-bold text-blue-600">{{ total_players }}</p>
+            </div>
+            <div class="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg text-center border-2 border-green-200 dark:border-green-700">
+                <h3 class="text-sm font-semibold text-gray-500">Players Sold</h3>
+                <p id="sold-players" class="text-3xl font-bold text-green-600">{{ sold_players }}</p>
+            </div>
+            <div class="bg-white dark:bg-gray-800 p-4 rounded-xl shadow-lg text-center border-2 border-red-200 dark:border-red-700">
+                <h3 class="text-sm font-semibold text-gray-500">Players Unsold</h3>
+                <p id="unsold-players" class="text-3xl font-bold text-red-600">{{ unsold_players }}</p>
+            </div>
+        </div>
+
+        <aside class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg border-2 border-gray-200 dark:border-gray-700 mb-8">
+            <div class="flex justify-between items-center mb-4 flex-wrap gap-2">
+                <h2 class="text-2xl font-bold text-gray-800 dark:text-gray-100">
+                    Registered Teams (<span id="team-count">{{ all_teams | length }}</span>)
+                </h2>
+                <div class="flex items-center space-x-2">
+                    <a href="{{ url_for('download_team_roster') }}" class="bg-indigo-600 text-white font-bold py-2 px-3 rounded-lg hover:bg-indigo-700 transition duration-150 shadow-md text-xs">Download Roster</a>
+                    <a href="{{ url_for('download_sold_players') }}" class="bg-blue-600 text-white font-bold py-2 px-3 rounded-lg hover:bg-blue-700 transition duration-150 shadow-md text-xs">Download Sold Players</a>
+                </div>
+            </div>
+            <ul id="team-list" class="flex flex-wrap gap-3">
+                {% if all_teams %}
+                    {% for team in all_teams %}
+                        <li id="team-roster-{{ team.id }}" class="bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 text-sm font-semibold px-3 py-1 rounded-full">
+                            {{ team.name }}
+                            {% if sold_players_by_team[team.name] %}
+                                : {{ sold_players_by_team[team.name] | join(', ') }}
+                            {% endif %}
+                        </li>
+                    {% endfor %}
+                {% else %}
+                    <li id="no-teams-msg" class="text-gray-500">No teams have been created yet.</li>
+                {% endif %}
+            </ul>
+        </aside>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <main id="feed-container" class="lg:col-span-2">
+                <h2 class="text-2xl font-bold text-gray-800 dark:text-gray-100 mb-4 mt-6 border-b border-gray-300 dark:border-gray-700 pb-2">🔥 Live Auctions</h2>
+                
+                <div id="auction-list" class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    {% if auctions %}
+                        {% for auction in auctions %}
+                            <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg border-2 border-gray-200 dark:border-gray-700 transition duration-300 hover:shadow-xl space-y-4" id="auction-{{ auction.id }}">
+                                <h3 class="text-xl font-extrabold text-indigo-700">{{ auction.title }}</h3>
+
+                                <div class="grid grid-cols-2 gap-4 text-sm font-medium">
+                                    <p class="text-gray-600">Current Bid:</p>
+                                    <p id="price-{{ auction.id }}" class="text-2xl font-bold text-orange-600">
+                                        ₹{{ '%.2f' | format(auction.current_price) }}
+                                    </p>
+
+                                    <p class="text-gray-600">Highest Bidding Team:</p>
+                                    <p id="bidder-{{ auction.id }}" class="text-indigo-600 dark:text-indigo-400 font-bold">
+                                        {{ auction.highest_bidder_username or 'N/A' }}
+                                        {% if auction.highest_bidder_username == team_name %} (Your Team){% endif %}
+                                    </p>
+                                     <p class="text-gray-600">Time Left:</p>
+                                    <p id="time-left-{{ auction.id }}" class="text-red-500 font-bold text-lg">
+                                        --
+                                    </p>
+                                </div>
+
+                                {% if can_bid %}
+                                    {% set min_bid_amount = auction.current_price + 100 %}
+
+                                    <form onsubmit="submitBid(event, {{ auction.id }})" class="mt-4 flex flex-col space-y-2">
+                                        <label for="bid-{{ auction.id }}" class="block text-sm font-medium text-gray-700">
+                                            Your Bid (Min ₹{{ '%.2f' | format(min_bid_amount) }}):
+                                        </label>
+                                        <input type="number" id="bid-input-{{ auction.id }}" name="bid" 
+                                            min="{{ '%.2f' | format(min_bid_amount) }}" 
+                                            step="0.01" 
+                                            value="{{ '%.2f' | format(min_bid_amount) }}" 
+                                            required
+                                            class="w-full p-3 border-2 border-indigo-300 rounded-lg text-lg focus:ring-indigo-500 focus:border-indigo-500 font-mono bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200">
+                                            
+                                        <button type="submit"
+                                            class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg shadow-md transition duration-200 transform hover:scale-[1.01] disabled:bg-gray-400">
+                                            PLACE BID
+                                        </button>
+                                        <p id="bid-message-{{ auction.id }}" class="text-xs mt-1 h-3 text-center font-medium"></p>
+                                    </form>
+                                {% endif %}
+                            </div>
+                        {% endfor %}
+                    {% else %}
+                        <div class="col-span-full p-6 bg-yellow-100 text-yellow-700 dark:bg-yellow-900 dark:text-yellow-200 rounded-xl text-center shadow-lg">
+                            No active auctions found. Check back later!
+                        </div>
+                    {% endif %}
+                </div>
+            </main>
+
+            <aside class="lg:col-span-1 mt-12">
+                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg border-2 border-gray-200 dark:border-gray-700 sticky top-8">
+                    <h2 class="text-xl font-bold text-gray-800 dark:text-gray-100 mb-4">Live Bidding Activity</h2>
+                    <ul id="activity-feed" class="space-y-3 h-96 overflow-y-auto pr-2">
+                        <li class="text-gray-500 dark:text-gray-400 text-sm">Waiting for bids...</li>
+                    </ul>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <!-- Dark/Light Mode Toggle -->
+    <button id="theme-toggle" class="fixed bottom-5 right-5 bg-gray-700 dark:bg-gray-200 text-white dark:text-gray-800 p-2 rounded-full shadow-lg z-50 focus:outline-none">
+        <svg id="theme-toggle-dark-icon" class="hidden h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M17.293 13.293A8 8 0 016.707 2.707a8.001 8.001 0 1010.586 10.586z"></path></svg>
+        <svg id="theme-toggle-light-icon" class="hidden h-5 w-5" fill="currentColor" viewBox="0 0 20 20" xmlns="http://www.w3.org/2000/svg"><path d="M10 2a1 1 0 011 1v1a1 1 0 11-2 0V3a1 1 0 011-1zm4 8a4 4 0 11-8 0 4 4 0 018 0zm-.464 4.95l.707.707a1 1 0 001.414-1.414l-.707-.707a1 1 0 00-1.414 1.414zm2.12-10.607a1 1 0 010 1.414l-.706.707a1 1 0 11-1.414-1.414l.707-.707a1 1 0 011.414 0zM17 11a1 1 0 100-2h-1a1 1 0 100 2h1zm-7 4a1 1 0 011 1v1a1 1 0 11-2 0v-1a1 1 0 011-1zM5.05 5.05a1 1 0 010 1.414l-.707.707a1 1 0 01-1.414-1.414l.707-.707a1 1 0 011.414 0zM4 11a1 1 0 100-2H3a1 1 0 100 2h1z" fill-rule="evenodd" clip-rule="evenodd"></path></svg>
+    </button>
+
+    <script>
+        // Socket.IO से कनेक्ट करें
+        const socket = io();
+
+        let timers = {};
+
+        // --- Utility Function ---
+        function formatCurrency(amount) {
+            return `₹${parseFloat(amount).toFixed(2)}`;
+        }
+
+        function formatTime(seconds) {
+            const minutes = Math.floor(seconds % 3600 / 60);
+            const remainingSeconds = Math.floor(seconds % 60);
+            return `${minutes}:${remainingSeconds < 10 ? '0' : ''}${remainingSeconds}`;
+        }
+
+        function updateTimer(auctionId, timeLeft) {
+            const timerElement = document.getElementById(`time-left-${auctionId}`);
+            if (timerElement) {
+                timerElement.textContent = formatTime(timeLeft);
+            }
+        }
+        function showBidMessage(auctionId, message, color) {
+            const msgElement = document.getElementById(`bid-message-${auctionId}`);
+            if (msgElement) {
+                msgElement.className = `text-xs mt-1 h-3 text-center font-medium ${color === 'red' ? 'text-red-600' : 'text-green-600'}`;
+                msgElement.textContent = message;
+                // मैसेज 3 सेकंड के बाद साफ़ करें
+                setTimeout(() => { msgElement.textContent = ''; }, 3000); 
+            }
+        }
+        
+        function createAuctionCard(auction) {
+            const canBid = {{ can_bid|tojson }};
+            const minBidAmount = auction.price + 100;
+
+            let formHtml = '';
+            if (canBid) {
+                formHtml = `
+                    <form onsubmit="submitBid(event, ${auction.id})" class="mt-4 flex flex-col space-y-2">
+                        <label for="bid-${auction.id}" class="block text-sm font-medium text-gray-700">
+                            Your Bid (Min ${formatCurrency(minBidAmount)}):
+                        </label>
+                        <input type="number" id="bid-input-${auction.id}" name="bid" 
+                            min="${minBidAmount.toFixed(2)}" 
+                            step="0.01" 
+                            value="${minBidAmount.toFixed(2)}" 
+                            required
+                            class="w-full p-3 border-2 border-indigo-300 rounded-lg text-lg focus:ring-indigo-500 focus:border-indigo-500 font-mono bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200">
+                            
+                        <button type="submit"
+                            class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg shadow-md transition duration-200 transform hover:scale-[1.01] disabled:bg-gray-400">
+                            PLACE BID
+                        </button>
+                        <p id="bid-message-${auction.id}" class="text-xs mt-1 h-3 text-center font-medium"></p>
+                    </form>
+                `;
+            }
+
+            return `
+                <div class="bg-white dark:bg-gray-800 p-6 rounded-xl shadow-lg border-2 border-gray-200 dark:border-gray-700 transition duration-300 hover:shadow-xl space-y-4" id="auction-${auction.id}">
+                    <h3 class="text-xl font-extrabold text-indigo-700">${auction.title}</h3>
+                    <div class="grid grid-cols-2 gap-4 text-sm font-medium">
+                        <p class="text-gray-600">Current Bid:</p>
+                        <p id="price-${auction.id}" class="text-2xl font-bold text-orange-600">
+                            ${formatCurrency(auction.price)}
+                        </p>
+                        <p class="text-gray-600">Highest Bidding Team:</p>
+                        <p id="bidder-${auction.id}" class="text-indigo-600 dark:text-indigo-400 font-bold">N/A</p>
+                        <p class="text-gray-600">Time Left:</p>
+                        <p id="time-left-${auction.id}" class="text-red-500 font-bold text-lg">--</p>
+                    </div>
+                    ${formHtml}
+                </div>
+            `;
+        }
+
+        // --- SocketIO Event Handlers ---
+        
+        // 1. Bid Submission (क्लाइंट से सर्वर को)
+        window.submitBid = function(event, auctionId) {
+            event.preventDefault();
+            
+            const bidInput = document.getElementById(`bid-input-${auctionId}`);
+            const bidAmount = parseFloat(bidInput.value);
+            
+            showBidMessage(auctionId, "Placing bid...", 'gray');
+
+            // सर्वर को 'place_bid' इवेंट भेजें
+            socket.emit('place_bid', {
+                auction_id: auctionId,
+                bid_amount: bidAmount
+            });
+        };
+
+        // 2. Live Update Listener (सर्वर से सभी क्लाइंट्स को)
+        socket.on('auction_update', function(data) {
+            const auctionId = data.auction_id;
+            const newPrice = data.new_price;
+            const bidder = data.bidder;
+            let timeLeft = data.time_left;
+
+
+            // a. प्राइस अपडेट करें
+            const priceElement = document.getElementById(`price-${auctionId}`);
+            if (priceElement) {
+                priceElement.textContent = formatCurrency(newPrice);
+            }
+
+            // b. बिडर नाम अपडेट करें
+            const bidderElement = document.getElementById(`bidder-${auctionId}`);
+
+
+
+
+
+            const currentUserTeam = "{{ team_name }}"; // Jinja2 द्वारा प्रदान किया गया
+
+            if (bidderElement) {
+                // चेक करें कि क्या वर्तमान यूज़र की टीम उच्चतम बिडर है
+                if (bidder === currentUserTeam) {
+                    bidderElement.innerHTML = `<span class="text-indigo-600 dark:text-indigo-400 font-bold">${bidder} (Your Team)</span>`;
+                } else {
+                    bidderElement.innerHTML = `<span class="text-indigo-600 dark:text-indigo-400 font-bold">${bidder}</span>`; 
+                }
+                
+                // c. इनपुट फ़ील्ड को नए मिनिमम बिड के साथ अपडेट करें
+                const newMinBid = newPrice + 100; // ₹100 का मिनिमम इंक्रीमेंट
+                const bidInput = document.getElementById(`bid-input-${auctionId}`);
+                if (bidInput) {
+                    bidInput.min = newMinBid.toFixed(2);
+                    // नए मिनिमम बिड को डिफ़ॉल्ट वैल्यू के रूप में सेट करें
+                    if (bidInput.value < newMinBid) {
+                         bidInput.value = newMinBid.toFixed(2);
+                    }
+                    // लेबल को भी अपडेट करें
+                    const labelElement = bidInput.previousElementSibling;
+                    if (labelElement && labelElement.tagName === 'LABEL') {
+                         labelElement.textContent = `Your Bid (Min ${formatCurrency(newMinBid)}):`;
+                    }
+                }
+            }
+             // Start the timer update interval
+            if (timers[auctionId]) {
+                clearInterval(timers[auctionId]);
+            }
+
+            updateTimer(auctionId, timeLeft);
+
+            timers[auctionId] = setInterval(() => {
+                timeLeft--;
+                updateTimer(auctionId, timeLeft);
+                if (timeLeft <= 0) clearInterval(timers[auctionId]);
+            }, 1000);
+
+        });
+        
+        // 3. Bid Status Feedback (सर्वर से केवल बिड लगाने वाले क्लाइंट को)
+        socket.on('bid_status', function(data) {
+             const auctionId = data.auction_id;
+             if (data.success) {
+                 showBidMessage(auctionId, data.message, 'green');
+             } else {
+                 showBidMessage(auctionId, data.message, 'red');
+             }
+         });
+         
+        // 4. New Auction Alert 
+        socket.on('new_auction', function(data) {
+            const auctionList = document.getElementById('auction-list');
+            const noAuctionsMsg = auctionList.querySelector('.col-span-full');
+            if (noAuctionsMsg) {
+                noAuctionsMsg.remove();
+            }
+            const newCardHtml = createAuctionCard(data);
+            auctionList.insertAdjacentHTML('beforeend', newCardHtml);
+
+            const auctionId = data.id;
+            let timeLeft = data.time_left;
+
+            if (timers[auctionId]) {
+                clearInterval(timers[auctionId]);
+            }
+
+            updateTimer(auctionId, timeLeft);
+
+            timers[auctionId] = setInterval(() => {
+                timeLeft--;
+                updateTimer(auctionId, timeLeft);
+                if (timeLeft <= 0) clearInterval(timers[auctionId]);
+            }, 1000);
+
+        });
+
+        // 5. New Team Listener
+        socket.on('new_team_added', function(data) {
+            const teamList = document.getElementById('team-list');
+            const teamCountSpan = document.getElementById('team-count');
+            const noTeamsMsg = document.getElementById('no-teams-msg');
+
+            // "No teams" संदेश हटाएं यदि मौजूद है
+            if (noTeamsMsg) {
+                noTeamsMsg.remove();
+            }
+
+            // सूची में नई टीम जोड़ें
+            const newTeamLi = document.createElement('li');
+            newTeamLi.className = 'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200 text-sm font-semibold px-3 py-1 rounded-full';
+            newTeamLi.textContent = data.name;
+            teamList.appendChild(newTeamLi);
+
+            // टीम गिनती अपडेट करें
+            teamCountSpan.textContent = parseInt(teamCountSpan.textContent) + 1;
+        });
+
+        // 6. Player Sold Listener
+         socket.on('player_sold', function(data) {
+            const auctionId = data.auction_id;
+            const auctionCard = document.getElementById(`auction-${auctionId}`);
+            if (auctionCard) {
+                auctionCard.innerHTML = `
+                    <h3 class="text-xl font-extrabold text-green-700">${data.player_name}</h3>
+                    <p class="text-center text-lg font-bold text-green-600">
+                        SOLD to ${data.team_name} for ${formatCurrency(data.price)}
+                    </p>
+                `;
+                auctionCard.classList.remove('border-gray-200', 'dark:border-gray-700');
+                auctionCard.classList.add('border-green-500', 'bg-green-50', 'dark:bg-green-900/50', 'dark:border-green-700');
+            }
+
+            // Update team budget if the current user is on the winning team
+            const currentUserTeam = "{{ team_name }}";
+            if (data.team_name === currentUserTeam) {
+                document.getElementById('team-budget').textContent = formatCurrency(data.new_budget);
+            }
+        });
+
+        // Listener for unsold players
+        socket.on('player_unsold', function(data) {
+            const auctionId = data.auction_id;
+            const auctionCard = document.getElementById(`auction-${auctionId}`);
+            if (auctionCard) {
+                auctionCard.innerHTML = `
+                    <h3 class="text-xl font-extrabold text-red-700">${data.player_name}</h3>
+                    <p class="text-center text-lg font-bold text-red-600">UNSOLD</p>
+                `;
+                auctionCard.classList.remove('border-gray-200', 'dark:border-gray-700');
+                auctionCard.classList.add('border-red-500', 'bg-red-50', 'dark:bg-red-900/50', 'dark:border-red-700');
+            }
+        });
+        // Listener for activity history on connect
+        socket.on('activity_history', function(history) {
+            const activityFeed = document.getElementById('activity-feed');
+            // Clear the "Waiting for bids..." message
+            activityFeed.innerHTML = '';
+            history.forEach(function(activity) {
+                const newActivity = document.createElement('li');
+                newActivity.className = 'text-sm p-2 bg-gray-100 dark:bg-gray-700 rounded-md';
+                newActivity.innerHTML = `${activity.message} <span class="text-gray-400 text-xs float-right">${activity.timestamp}</span>`;
+                activityFeed.appendChild(newActivity);
+            });
+        });
+
+        // 7. New Activity Listener
+        socket.on('new_activity', function(data) {
+            const activityFeed = document.getElementById('activity-feed');
+            const newActivity = document.createElement('li');
+            newActivity.className = 'text-sm p-2 bg-gray-100 dark:bg-gray-700 rounded-md'; 
+            newActivity.innerHTML = `${data.message} <span class="text-gray-400 text-xs float-right">${data.timestamp}</span>`;
+            activityFeed.appendChild(newActivity); // सबसे नीचे नई गतिविधि जोड़ें
+            activityFeed.scrollTop = activityFeed.scrollHeight; // स्क्रॉल को नीचे रखें
+        });
+
+        // 8. Stats Update Listener
+        socket.on('stats_update', function(data) {
+            document.getElementById('total-players').textContent = data.total_players;
+            document.getElementById('sold-players').textContent = data.sold_players;
+            document.getElementById('unsold-players').textContent = data.unsold_players;
+        });
+    </script>
+
+</body>
+</html>

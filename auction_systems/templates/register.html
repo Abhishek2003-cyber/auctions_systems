@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Register for Auction</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #e6eefd; 
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+        }
+    </style>
+</head>
+<body>
+    <div class="max-w-md w-full p-8 bg-white rounded-xl shadow-2xl border border-indigo-300">
+        <header class="text-center mb-8">
+            <h1 class="text-4xl font-extrabold text-indigo-600">Join the Auction</h1>
+            <p class="text-gray-500 mt-2">Create your bidder account.</p>
+        </header>
+
+        {% if registration_open_until and not registration_closed %}
+            <div id="timer-container" class="p-3 mb-4 bg-blue-100 text-blue-800 rounded-lg text-center font-medium border border-blue-300">
+                Registration closes in: <span id="timer" class="font-bold"></span>
+            </div>
+        {% endif %}
+
+        {% if error %}
+            <div class="p-3 mb-4 bg-red-100 text-red-700 rounded-lg text-sm font-medium border border-red-300">
+                {{ error }}
+            </div>
+        {% endif %}
+
+        {% if registration_closed %}
+            <div id="registration-closed-message" class="text-center">
+                <p class="text-lg text-red-600 font-semibold">Registration is currently closed.</p>
+                <p class="text-gray-500">Please check back later.</p>
+            </div>
+            <form id="registration-form" method="POST" action="{{ url_for('register') }}" class="space-y-6 hidden">
+        {% else %}
+            <form id="registration-form" method="POST" action="{{ url_for('register') }}" class="space-y-6">
+        {% endif %}
+
+            <div>
+                <label for="username" class="block text-sm font-medium text-gray-700 mb-1">Username</label>
+                <input type="text" id="username" name="username" required 
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-150"
+                       placeholder="Choose a unique username">
+            </div>
+
+            <div>
+                <label for="password" class="block text-sm font-medium text-gray-700 mb-1">Password</label>
+                <input type="password" id="password" name="password" required 
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-150"
+                       placeholder="Create a strong password">
+            </div>
+
+            <div>
+                <label for="discord_name" class="block text-sm font-medium text-gray-700 mb-1">Discord Name</label>
+                <input type="text" id="discord_name" name="discord_name" required 
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-150"
+                       placeholder="Your Discord username">
+            </div>
+
+            <div>
+                <label for="base_price" class="block text-sm font-medium text-gray-700 mb-1">Base Price (₹)</label>
+                <input type="number" id="base_price" name="base_price" required step="0.01" min="0"
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-150"
+                       placeholder="Your starting bid price">
+            </div>
+
+            <div>
+                <label for="game_level" class="block text-sm font-medium text-gray-700 mb-1">Game Level</label>
+                <input type="text" id="game_level" name="game_level" required 
+                       class="w-full p-3 border border-gray-300 rounded-lg focus:ring-indigo-500 focus:border-indigo-500 shadow-sm transition duration-150"
+                       placeholder="e.g., Pro, Intermediate, Beginner">
+            </div>
+
+            <button type="submit" 
+                    class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-3 rounded-lg transition duration-200 shadow-lg hover:shadow-xl">
+                Register Account
+            </button>
+        </form>
+
+        <p class="mt-6 text-center text-sm text-gray-500">
+            Already have an account? 
+            <a href="{{ url_for('login') }}" class="font-medium text-blue-600 hover:text-blue-800">
+                Login here
+            </a>
+        </p>
+    </div>
+
+    <script>
+        // यह Jinja2 से टाइमस्टैम्प प्राप्त करेगा
+        const registrationEndsAt = {{ registration_open_until|default(0) }};
+
+        if (registrationEndsAt > 0) {
+            const timerElement = document.getElementById('timer');
+            const formElement = document.getElementById('registration-form');
+            const timerContainer = document.getElementById('timer-container');
+
+            const updateTimer = () => {
+                const now = Math.floor(Date.now() / 1000);
+                const timeLeft = registrationEndsAt - now;
+
+                if (timeLeft <= 0) {
+                    clearInterval(timerInterval);
+                    timerElement.textContent = "Closed";
+                    // पेज को फिर से लोड करें ताकि सर्वर बंद स्थिति को संभाल सके
+                    window.location.reload();
+                    return;
+                }
+
+                const hours = Math.floor(timeLeft / 3600);
+                const minutes = Math.floor((timeLeft % 3600) / 60);
+                const seconds = timeLeft % 60;
+
+                // टाइमर को HH:MM:SS फॉर्मेट में दिखाएं
+                timerElement.textContent = 
+                    String(hours).padStart(2, '0') + ':' +
+                    String(minutes).padStart(2, '0') + ':' +
+                    String(seconds).padStart(2, '0');
+            };
+
+            // टाइमर को तुरंत शुरू करें और फिर हर सेकंड अपडेट करें
+            updateTimer();
+            const timerInterval = setInterval(updateTimer, 1000);
+        }
+    </script>
+</body>
+</html>
