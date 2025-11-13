@@ -1203,4 +1203,141 @@ def end_bidding(auction_id):
 def handle_connect(auth=None):
     if 'username' in session:
         conn = get_db_connection()
-        cur = get_dict_cursor(co... (7 KB left)
+        cur = get_dict_cursor(conn)
+        
+        try:
+            if DATABASE_URL:
+                cur.execute("SELECT message, timestamp FROM activity_log ORDER BY id DESC LIMIT 50")
+            else:
+                cur.execute("SELECT message, timestamp FROM activity_log ORDER BY id DESC LIMIT 50")
+            history = cur.fetchall()
+            history_data = [{'message': row['message'], 'timestamp': row['timestamp']} for row in reversed(history)]
+            emit('activity_history', history_data)
+        except Exception as e:
+            print(f"Error fetching activity history: {e}")
+        finally:
+            cur.close()
+            
+        print(f"User {session['username']} connected.")
+
+@socketio.on('get_all_timers')
+def handle_get_all_timers():
+    """क्लाइंट को सभी सक्रिय टाइमर की वर्तमान स्थिति भेजता है।"""
+    timer_statuses = {}
+    current_time = time.time()
+    try:
+        for auction_id, timer_info in list(active_bids.items()):
+            if timer_info and 'thread' in timer_info and timer_info['thread'].is_alive():
+                timer_statuses[auction_id] = max(0, int(timer_info['end_time'] - current_time))
+    except Exception as e:
+        print(f"Error iterating active_bids: {e}")
+        
+    emit('all_timers_status', timer_statuses)
+
+@socketio.on('place_bid')
+def handle_place_bid(data):
+    username = session.get('username')
+    
+    if not username:
+        emit('bid_status', {'success': False, 'message': 'Not logged in.', 'auction_id': data.get('auction_id')})
+        return
+
+    auction_id = data.get('auction_id')
+    if not auction_id:
+        emit('bid_status', {'success': False, 'message': 'Invalid auction ID.'})
+        return
+        
+    try:
+        new_bid = float(data.get('bid_amount'))
+    except (ValueError, TypeError):
+        emit('bid_status', {'success': False, 'message': 'Invalid bid amount.', 'auction_id': auction_id})
+        return
+    
+    conn = get_db_connection()
+    cur = get_dict_cursor(conn)
+
+    try:
+        if DATABASE_URL:
+            cur.execute("SELECT u.*, t.budget FROM users u JOIN teams t ON u.team_id = t.id WHERE u.username = %s", (username,))
+        else:
+            cur.execute("SELECT u.*, t.budget FROM users u JOIN teams t ON u.team_id = t.id WHERE u.username = ?", (username,))
+        user = cur.fetchone()
+        
+        if not user or not user['team_id']:
+            cur.close()
+            emit('bid_status', {'success': False, 'message': 'You are not assigned to a team.', 'auction_id': auction_id})
+            return
+            
+        if not user['can_bid']:
+            cur.close()
+            emit('bid_status', {'success': False, 'message': 'Your account is not authorized to place bids.', 'auction_id': auction_id})
+            return
+
+        team_budget = user['budget']
+        if new_bid > team_budget:
+            cur.close()
+            emit('bid_status', {'success': False, 'message': f'Bid exceeds your team budget of ₹{team_budget:.2f}.', 'auction_id': auction_id})
+            return
+
+        if DATABASE_URL:
+            cur.execute("SELECT * FROM auctions WHERE id = %s", (auction_id,))
+        else:
+            cur.execute("SELECT * FROM auctions WHERE id = ?", (auction_id,))
+        auction = cur.fetchone()
+        
+        if auction and auction['status'] == 'live':
+            current_price = auction['current_price']
+            
+            if new_bid > current_price:
+                if auction_id in active_bids and active_bids[auction_id]['thread']:
+                    active_bids[auction_id]['thread'].cancel()
+
+                if DATABASE_URL:
+                    cur.execute("UPDATE auctions SET current_price = %s, highest_bidding_team_id = %s WHERE id = %s", 
+                                 (new_bid, user['team_id'], auction_id))
+                    cur.execute("SELECT name FROM teams WHERE id = %s", (user['team_id'],))
+                else:
+                    cur.execute("UPDATE auctions SET current_price = ?, highest_bidding_team_id = ? WHERE id = ?", 
+                                 (new_bid, user['team_id'], auction_id))
+                    cur.execute("SELECT name FROM teams WHERE id = ?", (user['team_id'],))
+                
+                conn.commit()
+                team = cur.fetchone()
+                cur.close()
+
+                timer_thread = Timer(BID_DURATION, end_bidding, args=[auction_id])
+                timer_thread.start()
+                end_time = time.time() + BID_DURATION
+                active_bids[auction_id] = {'thread': timer_thread, 'end_time': end_time}
+
+                socketio.emit('auction_update', {
+                    'auction_id': auction_id,
+                    'new_price': new_bid,
+                    'bidder': team['name'],
+                    'time_left': BID_DURATION
+                })
+
+                emit('bid_status', {'success': True, 'message': f'Bid of {new_bid} placed for {team["name"]}!', 'auction_id': auction_id})
+                
+                log_activity(f"Team '{team['name']}' bid ₹{new_bid:.2f} on '{auction['title']}'.")
+
+            else:
+                cur.close()
+                emit('bid_status', {'success': False, 'message': f'Bid must be strictly higher than the current price: ₹{current_price:.2f}', 'auction_id': auction_id})
+        else:
+            cur.close()
+            emit('bid_status', {'success': False, 'message': 'Auction is not live or does not exist.', 'auction_id': auction_id})
+    
+    except Exception as e:
+        print(f"Error in handle_place_bid: {e}")
+        conn.rollback()
+        cur.close()
+        emit('bid_status', {'success': False, 'message': f'An internal error occurred: {e}', 'auction_id': auction_id})
+        
+
+if __name__ == '__main__':
+    # Use 'PORT' environment variable for Render, default to 5000 for local dev
+    port = int(os.environ.get('PORT', 5000))
+    # Set debug=False for production on Render
+    debug_mode = os.environ.get('RENDER') is None 
+    socketio.run(app, host='0.0.0.0', port=port, debug=debug_mode)
