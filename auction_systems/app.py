@@ -25,6 +25,12 @@ socketio = SocketIO(app)
 
 DATABASE = 'auction.db'
 DATABASE_URL = os.getenv('DATABASE_URL')
+# ऑक्शन के लिए टाइमर की अवधि
+BID_DURATION = 15 # सेकंड में बिड की अवधि
+NO_BID_DURATION = 120 # सेकंड में, अगर कोई बोली नहीं लगती है
+
+# ऑक्शन ID के अनुसार एक्टिव बिड को ट्रैक करें
+active_bids = {} 
 
 def get_db_connection():
     """डेटाबेस कनेक्शन प्राप्त करें।"""
@@ -59,7 +65,7 @@ def close_connection(exception):
     if conn is not None:
         conn.close()
 
-# --- [FIXED] init_db Function ---
+# --- init_db Function ---
 def init_db():
     """डेटाबेस को इनिशियलाइज़ करें और टेबल बनाएं।"""
     conn = get_db_connection()
@@ -169,7 +175,7 @@ def init_db():
                 title TEXT NOT NULL,
                 current_price REAL NOT NULL,
                 highest_bidding_team_id INTEGER,
-                status TEXT NOT NULL,      -- 'live' or 'closed'
+                status TEXT NOT NULL, -- 'live' or 'closed'
                 FOREIGN KEY (highest_bidding_team_id) REFERENCES teams (id)
             )
         """)
@@ -199,7 +205,7 @@ def init_db():
     conn.commit()
     cur.close()
 
-# --- [FIXED] app_context Block ---
+# --- app_context Block ---
 # एप्लिकेशन शुरू होने पर डेटाबेस और एडमिन उपयोगकर्ता को इनिशियलाइज़ करें
 with app.app_context():
     init_db()
@@ -284,6 +290,7 @@ def is_approved_bidder():
         return session.get('role') == 'bidder' and user and user['is_approved']
 
 
+# --- [FIXED] broadcast_stats Function ---
 def broadcast_stats():
     """Calculates and broadcasts auction stats to all clients."""
     with app.app_context():
@@ -291,19 +298,29 @@ def broadcast_stats():
         cur = get_dict_cursor(conn)
         
         if DATABASE_URL:
-            cur.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
-            total_players = cur.fetchone()['count']
-            cur.execute("SELECT COUNT(id) FROM sold_players")
-            sold_players_count = cur.fetchone()['count']
-            cur.execute("SELECT COUNT(id) FROM auctions WHERE status = 'Unsold'")
-            unsold_auctions_count = cur.fetchone()['count']
+            cur.execute("SELECT COUNT(id) AS count FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
+            total_players_result = cur.fetchone()
+            total_players = total_players_result['count'] if total_players_result and 'count' in total_players_result else 0
+            
+            cur.execute("SELECT COUNT(id) AS count FROM sold_players")
+            sold_result = cur.fetchone()
+            sold_players_count = sold_result['count'] if sold_result and 'count' in sold_result else 0
+            
+            cur.execute("SELECT COUNT(id) AS count FROM auctions WHERE status = 'Unsold'")
+            unsold_result = cur.fetchone()
+            unsold_auctions_count = unsold_result['count'] if unsold_result and 'count' in unsold_result else 0
         else:
-            cur.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
-            total_players = cur.fetchone()['count']
-            cur.execute("SELECT COUNT(id) FROM sold_players")
-            sold_players_count = cur.fetchone()['count']
-            cur.execute("SELECT COUNT(id) FROM auctions WHERE status = 'Unsold'")
-            unsold_auctions_count = cur.fetchone()['count']
+            cur.execute("SELECT COUNT(id) AS count FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
+            total_players_result = cur.fetchone()
+            total_players = total_players_result['count'] if total_players_result and 'count' in total_players_result else 0
+            
+            cur.execute("SELECT COUNT(id) AS count FROM sold_players")
+            sold_result = cur.fetchone()
+            sold_players_count = sold_result['count'] if sold_result and 'count' in sold_result else 0
+            
+            cur.execute("SELECT COUNT(id) AS count FROM auctions WHERE status = 'Unsold'")
+            unsold_result = cur.fetchone()
+            unsold_auctions_count = unsold_result['count'] if unsold_result and 'count' in unsold_result else 0
             
         cur.close()
         unsold_players = unsold_auctions_count # Simplified logic
@@ -338,6 +355,7 @@ def log_activity(message):
 
 # --- Routes ---
 
+# --- [FIXED] index Route ---
 @app.route('/')
 def index():
     if 'username' not in session:
@@ -407,19 +425,29 @@ def index():
     all_teams = cur.fetchall()
 
     if DATABASE_URL:
-        cur.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
-        total_players = cur.fetchone()['count']
-        cur.execute("SELECT COUNT(id) FROM sold_players")
-        sold_players = cur.fetchone()['count']
-        cur.execute("SELECT COUNT(id) FROM auctions WHERE status = 'Unsold'")
-        unsold_players_count = cur.fetchone()['count']
+        cur.execute("SELECT COUNT(id) AS count FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
+        total_players_result = cur.fetchone()
+        total_players = total_players_result['count'] if total_players_result and 'count' in total_players_result else 0
+        
+        cur.execute("SELECT COUNT(id) AS count FROM sold_players")
+        sold_result = cur.fetchone()
+        sold_players = sold_result['count'] if sold_result and 'count' in sold_result else 0
+        
+        cur.execute("SELECT COUNT(id) AS count FROM auctions WHERE status = 'Unsold'")
+        unsold_result = cur.fetchone()
+        unsold_players_count = unsold_result['count'] if unsold_result and 'count' in unsold_result else 0
     else:
-        cur.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
-        total_players = cur.fetchone()['count']
-        cur.execute("SELECT COUNT(id) FROM sold_players")
-        sold_players = cur.fetchone()['count']
-        cur.execute("SELECT COUNT(id) FROM auctions WHERE status = 'Unsold'")
-        unsold_players_count = cur.fetchone()['count']
+        cur.execute("SELECT COUNT(id) AS count FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
+        total_players_result = cur.fetchone()
+        total_players = total_players_result['count'] if total_players_result and 'count' in total_players_result else 0
+        
+        cur.execute("SELECT COUNT(id) AS count FROM sold_players")
+        sold_result = cur.fetchone()
+        sold_players = sold_result['count'] if sold_result and 'count' in sold_result else 0
+        
+        cur.execute("SELECT COUNT(id) AS count FROM auctions WHERE status = 'Unsold'")
+        unsold_result = cur.fetchone()
+        unsold_players_count = unsold_result['count'] if unsold_result and 'count' in unsold_result else 0
         
     cur.close()
     
@@ -615,6 +643,7 @@ def logout():
 
 # --- Admin Routes ---
 
+# --- [FIXED] admin_dashboard Route ---
 @app.route('/admin')
 def admin_dashboard():
     if not is_admin():
@@ -658,17 +687,26 @@ def admin_dashboard():
         """)
     players_ready_for_auction = cur.fetchall()
 
+    # --- START FIX: Robust fetching for stats ---
     if DATABASE_URL:
-        cur.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
-        total_players = cur.fetchone()['count']
-        cur.execute("SELECT COUNT(id) FROM sold_players")
-        sold_players = cur.fetchone()['count']
+        cur.execute("SELECT COUNT(id) AS count FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
+        total_players_result = cur.fetchone()
+        total_players = total_players_result['count'] if total_players_result and 'count' in total_players_result else 0
+        
+        cur.execute("SELECT COUNT(id) AS count FROM sold_players")
+        sold_result = cur.fetchone()
+        sold_players = sold_result['count'] if sold_result and 'count' in sold_result else 0
     else:
-        cur.execute("SELECT COUNT(id) FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
-        total_players = cur.fetchone()['count']
-        cur.execute("SELECT COUNT(id) FROM sold_players")
-        sold_players = cur.fetchone()['count']
+        cur.execute("SELECT COUNT(id) AS count FROM users WHERE role = 'bidder' AND base_price IS NOT NULL")
+        total_players_result = cur.fetchone()
+        total_players = total_players_result['count'] if total_players_result and 'count' in total_players_result else 0
+        
+        cur.execute("SELECT COUNT(id) AS count FROM sold_players")
+        sold_result = cur.fetchone()
+        sold_players = sold_result['count'] if sold_result and 'count' in sold_result else 0
 
+    # --- END FIX: Robust fetching for stats ---
+    
     unsold_players = total_players - sold_players
     
     if DATABASE_URL:
@@ -693,7 +731,9 @@ def admin_dashboard():
     registration_status = 'closed'
     registration_ends_at = None
     if setting:
-        open_until_timestamp = float(setting['value'])
+        # Handling for both RealDictCursor (dict) and standard cursor (Row/tuple access)
+        setting_value = setting['value'] if isinstance(setting, dict) and 'value' in setting else setting[0] if isinstance(setting, tuple) and len(setting) > 0 else '0'
+        open_until_timestamp = float(setting_value)
         if time.time() < open_until_timestamp:
             registration_status = 'open'
             ends_dt = datetime.fromtimestamp(open_until_timestamp)
@@ -787,7 +827,7 @@ def toggle_registration():
         conn.rollback()
     finally:
         cur.close()
-        
+      
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/update_budget', methods=['POST'])
@@ -805,7 +845,7 @@ def update_budget():
         else:
             cur.execute("UPDATE system_settings SET value = ? WHERE key = 'default_team_budget'", (new_budget,))
         conn.commit()
-        log_activity(f"Admin updated the default team budget to ₹{float(new_budget):.2f}.")
+        log_activity(f"Admin updated default team budget to {new_budget}.")
     except Exception as e:
         print(f"Error updating budget: {e}")
         conn.rollback()
@@ -818,13 +858,10 @@ def update_budget():
 def update_team_budget():
     if not is_admin():
         return redirect(url_for('index'))
-
     team_id = request.form.get('team_id')
     new_budget = request.form.get('new_budget')
-
     conn = get_db_connection()
     cur = get_dict_cursor(conn)
-    
     try:
         if DATABASE_URL:
             cur.execute("UPDATE teams SET budget = %s WHERE id = %s", (new_budget, team_id))
@@ -837,7 +874,6 @@ def update_team_budget():
         conn.rollback()
     finally:
         cur.close()
-
     return redirect(url_for('manage_teams'))
 
 @app.route('/admin/reauction/<int:auction_id>', methods=['POST'])
@@ -845,31 +881,26 @@ def reauction_player(auction_id):
     """एक बिना बिके खिलाड़ी को फिर से नीलाम करता है।"""
     if not is_admin():
         return redirect(url_for('index'))
-
     conn = get_db_connection()
     cur = get_dict_cursor(conn)
-    
     try:
         if DATABASE_URL:
             cur.execute("SELECT * FROM auctions WHERE id = %s AND status = 'Unsold'", (auction_id,))
         else:
             cur.execute("SELECT * FROM auctions WHERE id = ? AND status = 'Unsold'", (auction_id,))
         auction = cur.fetchone()
-
         if not auction:
             cur.close()
             return "Unsold auction not found", 404
-
         if DATABASE_URL:
             cur.execute("SELECT * FROM users WHERE username = %s", (auction['title'],))
         else:
             cur.execute("SELECT * FROM users WHERE username = ?", (auction['title'],))
         player = cur.fetchone()
-        
         if not player:
             cur.close()
             return "Player for this auction not found", 404
-
+        
         # नीलामी को रीसेट करें
         if DATABASE_URL:
             cur.execute("UPDATE auctions SET status = 'live', current_price = %s, highest_bidding_team_id = NULL WHERE id = %s", (player['base_price'], auction_id))
@@ -877,7 +908,7 @@ def reauction_player(auction_id):
             cur.execute("UPDATE auctions SET status = 'live', current_price = ?, highest_bidding_team_id = NULL WHERE id = ?", (player['base_price'], auction_id))
         conn.commit()
         cur.close()
-
+        
         # Re-emit the new_auction event to make it appear on all feeds
         socketio.emit('new_auction', {
             'id': auction_id,
@@ -893,33 +924,29 @@ def reauction_player(auction_id):
         # 60-सेकंड का 'नो-बिड' टाइमर फिर से शुरू करें
         timer_thread = Timer(NO_BID_DURATION, mark_as_unsold, args=[auction_id])
         timer_thread.start()
-        
         # Store the timer thread and its end time
         end_time = time.time() + NO_BID_DURATION
         active_bids[auction_id] = {'thread': timer_thread, 'end_time': end_time}
-    
+        
     except Exception as e:
-        print(f"Error in reauction: {e}")
+        print(f"Error re-auctioning player: {e}")
         conn.rollback()
         cur.close()
-        
     return redirect(url_for('admin_dashboard'))
 
-@app.route('/admin/start_player_auction/<int:user_id>', methods=['POST'])
-def start_player_auction(user_id): # पंजीकृत उपयोगकर्ता (खिलाड़ी) के लिए नीलामी शुरू करता है।
+@app.route('/admin/start_auction/<int:user_id>', methods=['POST'])
+def start_auction(user_id):
+    """एक खिलाड़ी के लिए नीलामी शुरू करता है जो अभी तक नीलाम नहीं हुआ है।"""
     if not is_admin():
         return redirect(url_for('index'))
-    
     conn = get_db_connection()
     cur = get_dict_cursor(conn)
-    
     try:
         if DATABASE_URL:
             cur.execute("SELECT * FROM users WHERE id = %s AND role = 'bidder'", (user_id,))
         else:
             cur.execute("SELECT * FROM users WHERE id = ? AND role = 'bidder'", (user_id,))
         player = cur.fetchone()
-        
         if not player:
             cur.close()
             return "Player not found", 404
@@ -929,7 +956,6 @@ def start_player_auction(user_id): # पंजीकृत उपयोगकर
         else:
             cur.execute("SELECT id FROM auctions WHERE title = ?", (player['username'],))
         existing_auction = cur.fetchone()
-        
         if existing_auction:
             cur.close()
             return redirect(url_for('admin_dashboard', error=f"Auction for {player['username']} already exists."))
@@ -959,28 +985,22 @@ def start_player_auction(user_id): # पंजीकृत उपयोगकर
         # 60-सेकंड का 'नो-बिड' टाइमर शुरू करें
         timer_thread = Timer(NO_BID_DURATION, mark_as_unsold, args=[auction_id])
         timer_thread.start()
-        
         end_time = time.time() + NO_BID_DURATION
         active_bids[auction_id] = {'thread': timer_thread, 'end_time': end_time}
-        
     except Exception as e:
         print(f"Error starting auction: {e}")
         conn.rollback()
         cur.close()
-
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/admin/add_auction', methods=['POST'])
 def add_auction():
     if not is_admin():
         return redirect(url_for('index'))
-    
     title = request.form['title']
     starting_price = float(request.form['price'])
-    
     conn = get_db_connection()
     cur = get_dict_cursor(conn)
-    
     try:
         if DATABASE_URL:
             cur.execute("INSERT INTO auctions (title, current_price, status) VALUES (%s, %s, %s)", (title, starting_price, 'live'))
@@ -993,47 +1013,52 @@ def add_auction():
         print(f"Error adding auction: {e}")
         conn.rollback()
         cur.close()
-    
     return redirect(url_for('admin_dashboard'))
 
 @app.route('/manage_teams')
 def manage_teams():
     if not is_admin():
         return redirect(url_for('index'))
-    
     conn = get_db_connection()
     cur = get_dict_cursor(conn)
     
     if DATABASE_URL:
+        # PostgreSQL syntax for aggregate function
         cur.execute("""
             SELECT t.id, t.name, t.budget, STRING_AGG(sp.player_name, ', ') as members
-            FROM teams t 
+            FROM teams t
             LEFT JOIN sold_players sp ON sp.winning_team_id = t.id
             GROUP BY t.id, t.name, t.budget
             ORDER BY t.name
         """)
-    else: # SQLite
+    else:
+        # SQLite syntax for aggregate function
         cur.execute("""
-            SELECT t.id, t.name, t.budget, (
-                SELECT GROUP_CONCAT(sp.player_name, ', ')
-                FROM sold_players sp
-                WHERE sp.winning_team_id = t.id
-            ) as members
-            FROM teams t 
+            SELECT 
+                t.id, 
+                t.name, 
+                t.budget, 
+                (
+                    SELECT GROUP_CONCAT(sp.player_name, ', ') 
+                    FROM sold_players sp 
+                    WHERE sp.winning_team_id = t.id
+                ) as members
+            FROM teams t
             ORDER BY t.name
         """)
     teams_with_budgets = cur.fetchall()
-
+    
+    # Get sold players by team for the display below
     if DATABASE_URL:
         cur.execute("""
-            SELECT t.name as team_name, sp.player_name, sp.sold_price
+            SELECT t.name as team_name, sp.player_name
             FROM sold_players sp
             JOIN teams t ON sp.winning_team_id = t.id
             ORDER BY t.name, sp.player_name
         """)
     else:
         cur.execute("""
-            SELECT t.name as team_name, sp.player_name, sp.sold_price
+            SELECT t.name as team_name, sp.player_name
             FROM sold_players sp
             JOIN teams t ON sp.winning_team_id = t.id
             ORDER BY t.name, sp.player_name
@@ -1043,7 +1068,7 @@ def manage_teams():
     cur.execute("SELECT id, name FROM teams ORDER BY name")
     all_teams = cur.fetchall()
     cur.close()
-
+    
     return render_template('manage_teams.html', 
                            teams_with_budgets=teams_with_budgets,
                            all_teams=all_teams,
@@ -1055,7 +1080,6 @@ def manage_teams():
 def download_sold_players():
     conn = get_db_connection()
     cur = get_dict_cursor(conn)
-    
     if DATABASE_URL:
         cur.execute("""
             SELECT sp.player_name, t.name as team_name, sp.sold_price
@@ -1078,8 +1102,8 @@ def download_sold_players():
     writer.writerow(['Player Name', 'Team Name', 'Sold Price (₹)'])
     for player in sold_players_data:
         writer.writerow([player['player_name'], player['team_name'], player['sold_price']])
+    
     output.seek(0)
-
     return Response(
         output,
         mimetype="text/csv",
@@ -1094,19 +1118,23 @@ def download_team_roster():
     if DATABASE_URL:
         cur.execute("""
             SELECT t.name, t.budget, STRING_AGG(sp.player_name, ', ') as members
-            FROM teams t 
+            FROM teams t
             LEFT JOIN sold_players sp ON sp.winning_team_id = t.id
             GROUP BY t.id, t.name, t.budget
             ORDER BY t.name
         """)
-    else: # SQLite
+    else:
+        # SQLite
         cur.execute("""
-            SELECT t.name, t.budget, (
-                SELECT GROUP_CONCAT(sp.player_name, ', ')
-                FROM sold_players sp
-                WHERE sp.winning_team_id = t.id
-            ) as members
-            FROM teams t 
+            SELECT 
+                t.name, 
+                t.budget, 
+                (
+                    SELECT GROUP_CONCAT(sp.player_name, ', ') 
+                    FROM sold_players sp 
+                    WHERE sp.winning_team_id = t.id
+                ) as members
+            FROM teams t
             ORDER BY t.name
         """)
     teams_data = cur.fetchall()
@@ -1117,8 +1145,8 @@ def download_team_roster():
     writer.writerow(['Team Name', 'Budget Remaining (₹)', 'Players Bought'])
     for team in teams_data:
         writer.writerow([team['name'], team['budget'], team['members'] or ''])
+    
     output.seek(0)
-
     return Response(
         output,
         mimetype="text/csv",
@@ -1127,29 +1155,42 @@ def download_team_roster():
 
 # --- SocketIO for Live Bidding ---
 
-active_bids = {}  # ऑक्शन ID के अनुसार एक्टिव बिड को ट्रैक करें
-BID_DURATION = 15 # सेकंड में बिड की अवधि
-NO_BID_DURATION = 120 # सेकंड में, अगर कोई बोली नहीं लगती है
-
 def end_bidding(auction_id):
     """बिडिंग अवधि समाप्त होने पर कॉल किया जाने वाला फ़ंक्शन।"""
     with app.app_context():
-        print(f"ऑक्शन {auction_id} के लिए बिडिंग अवधि समाप्त हो गई।")
+        print(f"Auction {auction_id} bidding period ended. Determining winner.")
         conn = get_db_connection()
         cur = get_dict_cursor(conn)
         
         try:
             if DATABASE_URL:
-                cur.execute("SELECT * FROM auctions WHERE id = %s", (auction_id,))
+                cur.execute("SELECT * FROM auctions WHERE id = %s AND status = 'live'", (auction_id,))
             else:
-                cur.execute("SELECT * FROM auctions WHERE id = ?", (auction_id,))
+                cur.execute("SELECT * FROM auctions WHERE id = ? AND status = 'live'", (auction_id,))
             auction = cur.fetchone()
             
-            if auction and auction['highest_bidding_team_id']:
-                winning_team_id = auction['highest_bidding_team_id']
-                sold_price = auction['current_price']
-                player_name = auction['title']
-
+            if not auction:
+                print(f"Auction {auction_id} not found or already closed/sold.")
+                return
+            
+            player_name = auction['title']
+            winning_team_id = auction['highest_bidding_team_id']
+            sold_price = auction['current_price']
+            
+            if winning_team_id is None:
+                # Unsold logic
+                if DATABASE_URL:
+                    cur.execute("UPDATE auctions SET status = 'Unsold' WHERE id = %s", (auction_id,))
+                else:
+                    cur.execute("UPDATE auctions SET status = 'Unsold' WHERE id = ?", (auction_id,))
+                conn.commit()
+                
+                log_activity(f"Player '{player_name}' went unsold as the timer ran out.")
+                socketio.emit('player_unsold', {'auction_id': auction_id, 'player_name': player_name})
+                broadcast_stats()
+                
+            else:
+                # Sold logic
                 if DATABASE_URL:
                     cur.execute("UPDATE auctions SET status = 'Sold' WHERE id = %s", (auction_id,))
                     cur.execute("INSERT INTO sold_players (player_name, winning_team_id, sold_price) VALUES (%s, %s, %s)", (player_name, winning_team_id, sold_price))
@@ -1165,98 +1206,88 @@ def end_bidding(auction_id):
                         cur.execute("UPDATE users SET team_id = %s WHERE id = %s", (winning_team_id, player_user['id']))
                     else:
                         cur.execute("UPDATE users SET team_id = ? WHERE id = ?", (winning_team_id, player_user['id']))
-
+                        
                 if DATABASE_URL:
                     cur.execute("UPDATE teams SET budget = budget - %s WHERE id = %s", (sold_price, winning_team_id))
-                else:
-                    cur.execute("UPDATE teams SET budget = budget - ? WHERE id = ?", (sold_price, winning_team_id))
-
-                conn.commit()
-
-                if DATABASE_URL:
                     cur.execute("SELECT name, budget FROM teams WHERE id = %s", (winning_team_id,))
                 else:
+                    cur.execute("UPDATE teams SET budget = budget - ? WHERE id = ?", (sold_price, winning_team_id))
                     cur.execute("SELECT name, budget FROM teams WHERE id = ?", (winning_team_id,))
-                winning_team = cur.fetchone()
-
-                socketio.emit('player_sold', {
-                    'auction_id': auction_id, 'player_name': player_name, 
-                    'team_name': winning_team['name'], 'price': sold_price,
-                    'winning_team_id': winning_team_id, 'new_budget': winning_team['budget']
-                })
+                    
+                conn.commit()
                 
+                winning_team = cur.fetchone()
+                socketio.emit('player_sold', {
+                    'auction_id': auction_id,
+                    'player_name': player_name,
+                    'team_name': winning_team['name'],
+                    'price': sold_price,
+                    'winning_team_id': winning_team_id,
+                    'new_budget': winning_team['budget']
+                })
                 log_activity(f"Player '{player_name}' was sold to '{winning_team['name']}' for ₹{sold_price:.2f}.")
                 broadcast_stats()
 
             # सक्रिय बिड से ऑक्शन को हटा दें
             if auction_id in active_bids:
                 active_bids.pop(auction_id, None)
-                
+
         except Exception as e:
             print(f"Error in end_bidding: {e}")
             conn.rollback()
         finally:
             cur.close()
 
-
 @socketio.on('connect')
 def handle_connect(auth=None):
     if 'username' in session:
         conn = get_db_connection()
         cur = get_dict_cursor(conn)
-        
         try:
             if DATABASE_URL:
                 cur.execute("SELECT message, timestamp FROM activity_log ORDER BY id DESC LIMIT 50")
             else:
                 cur.execute("SELECT message, timestamp FROM activity_log ORDER BY id DESC LIMIT 50")
             history = cur.fetchall()
+            # Reverse order so oldest are first
             history_data = [{'message': row['message'], 'timestamp': row['timestamp']} for row in reversed(history)]
             emit('activity_history', history_data)
         except Exception as e:
             print(f"Error fetching activity history: {e}")
         finally:
             cur.close()
-            
         print(f"User {session['username']} connected.")
 
 @socketio.on('get_all_timers')
 def handle_get_all_timers():
-    """क्लाइंट को सभी सक्रिय टाइमर की वर्तमान स्थिति भेजता है।"""
-    timer_statuses = {}
+    """क्लाइंट को सभी सक्रिय ऑक्शन टाइमर भेजता है।"""
+    timers_data = {}
     current_time = time.time()
-    try:
-        for auction_id, timer_info in list(active_bids.items()):
-            if timer_info and 'thread' in timer_info and timer_info['thread'].is_alive():
-                timer_statuses[auction_id] = max(0, int(timer_info['end_time'] - current_time))
-    except Exception as e:
-        print(f"Error iterating active_bids: {e}")
-        
-    emit('all_timers_status', timer_statuses)
+    for auction_id, data in active_bids.items():
+        time_left = max(0, int(data['end_time'] - current_time))
+        timers_data[auction_id] = time_left
+    emit('all_timers', timers_data)
+
 
 @socketio.on('place_bid')
 def handle_place_bid(data):
-    username = session.get('username')
-    
-    if not username:
-        emit('bid_status', {'success': False, 'message': 'Not logged in.', 'auction_id': data.get('auction_id')})
-        return
-
-    auction_id = data.get('auction_id')
-    if not auction_id:
-        emit('bid_status', {'success': False, 'message': 'Invalid auction ID.'})
+    if not is_approved_bidder():
+        emit('bid_status', {'success': False, 'message': 'You must be a verified team manager to bid.'})
         return
         
-    try:
-        new_bid = float(data.get('bid_amount'))
-    except (ValueError, TypeError):
-        emit('bid_status', {'success': False, 'message': 'Invalid bid amount.', 'auction_id': auction_id})
-        return
+    auction_id = data.get('auction_id')
+    new_bid = float(data.get('bid_amount'))
+    username = session.get('username')
     
+    if not auction_id or new_bid is None or new_bid <= 0:
+        emit('bid_status', {'success': False, 'message': 'Invalid bid amount or auction ID.'})
+        return
+
     conn = get_db_connection()
     cur = get_dict_cursor(conn)
 
     try:
+        # Fetch team info and budget
         if DATABASE_URL:
             cur.execute("SELECT u.*, t.budget FROM users u JOIN teams t ON u.team_id = t.id WHERE u.username = %s", (username,))
         else:
@@ -1267,18 +1298,20 @@ def handle_place_bid(data):
             cur.close()
             emit('bid_status', {'success': False, 'message': 'You are not assigned to a team.', 'auction_id': auction_id})
             return
-            
+        
         if not user['can_bid']:
             cur.close()
             emit('bid_status', {'success': False, 'message': 'Your account is not authorized to place bids.', 'auction_id': auction_id})
             return
-
+            
         team_budget = user['budget']
+        
         if new_bid > team_budget:
             cur.close()
             emit('bid_status', {'success': False, 'message': f'Bid exceeds your team budget of ₹{team_budget:.2f}.', 'auction_id': auction_id})
             return
-
+            
+        # Fetch auction info
         if DATABASE_URL:
             cur.execute("SELECT * FROM auctions WHERE id = %s", (auction_id,))
         else:
@@ -1289,24 +1322,25 @@ def handle_place_bid(data):
             current_price = auction['current_price']
             
             if new_bid > current_price:
-                if auction_id in active_bids and active_bids[auction_id]['thread']:
-                    active_bids[auction_id]['thread'].cancel()
-
+                # Update auction in DB
                 if DATABASE_URL:
-                    cur.execute("UPDATE auctions SET current_price = %s, highest_bidding_team_id = %s WHERE id = %s", 
-                                 (new_bid, user['team_id'], auction_id))
+                    cur.execute("UPDATE auctions SET current_price = %s, highest_bidding_team_id = %s WHERE id = %s", (new_bid, user['team_id'], auction_id))
                     cur.execute("SELECT name FROM teams WHERE id = %s", (user['team_id'],))
                 else:
-                    cur.execute("UPDATE auctions SET current_price = ?, highest_bidding_team_id = ? WHERE id = ?", 
-                                 (new_bid, user['team_id'], auction_id))
+                    cur.execute("UPDATE auctions SET current_price = ?, highest_bidding_team_id = ? WHERE id = ?", (new_bid, user['team_id'], auction_id))
                     cur.execute("SELECT name FROM teams WHERE id = ?", (user['team_id'],))
-                
-                conn.commit()
+                    
                 team = cur.fetchone()
+                conn.commit()
                 cur.close()
 
+                # Cancel previous timer and start a new one
+                if auction_id in active_bids:
+                    active_bids[auction_id]['thread'].cancel()
+                
                 timer_thread = Timer(BID_DURATION, end_bidding, args=[auction_id])
                 timer_thread.start()
+                
                 end_time = time.time() + BID_DURATION
                 active_bids[auction_id] = {'thread': timer_thread, 'end_time': end_time}
 
@@ -1338,6 +1372,12 @@ def handle_place_bid(data):
 if __name__ == '__main__':
     # Use 'PORT' environment variable for Render, default to 5000 for local dev
     port = int(os.environ.get('PORT', 5000))
-    # Set debug=False for production on Render
-    debug_mode = os.environ.get('RENDER') is None 
-    socketio.run(app, host='0.0.0.0', port=port, debug=debug_mode)
+    # Use gunicorn only in production (Render)
+    if 'PORT' in os.environ:
+        # Note: gunicorn is used via Procfile for deployment
+        # This block is usually for local testing only
+        print(f"Running in production mode. Gunicorn/Render will handle starting the app on port {port}.")
+    else:
+        # Run in development mode (local)
+        print(f"Running in development mode on http://127.0.0.1:{port}")
+        socketio.run(app, debug=True, port=port)
